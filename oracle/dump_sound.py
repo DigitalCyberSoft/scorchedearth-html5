@@ -78,6 +78,9 @@ def dump_sound():
         (19, 5), (440, 50), (5000, 12), (15000, 3), (12000, 40), (3000, 100),
         (50, 5), (7000, 7), (11000, 33), (200, 1), (1000, 8), (30, 18),
         (520, 36), (700, 30), (300, 40), (900, 40), (70, 24), (40, 30),
+        # 60-ms tones: the flight-loop seed (300) + the VEL swap targets the
+        # mock-AudioContext fly test re-pitches to (50, 440, 12000-ceiling).
+        (300, 60), (50, 60), (440, 60), (12000, 60),
     ]
     square = []
     for (freq, ms) in TONE_BATT:
@@ -124,6 +127,14 @@ def dump_sound():
         "death0": [[0x14, 22], [0, 21]],
         "mixed": [[100, 22], [200, 28], [100, 34]],
         "empty_silence": [[0, 5]],
+        # no tones at all: _seq_array(()) hits the `_np.zeros(1)`/`new
+        # Float64Array(1)` (total==0) branch -> a 1-sample silent plane.
+        "empty": [],
+        # sub-19 START with an EXPLICIT f1 end: exercises the `f1 < MIN_FREQ_HZ`
+        # arm of the silence test that the f1=None blips never reach.  Both ends
+        # sub-19 -> silence; audible end -> clamp the start up to 19 and sweep.
+        "sub19_sweep_silent": [[10, 10, 15]],
+        "sub19_sweep_clamped": [[10, 10, 500]],
     }
     seq = []
     for name, tones in SEQ_BATT.items():
@@ -140,6 +151,22 @@ def dump_sound():
         out = [list(t) for t in sfx._sweep_steps(start, step, count, blip_ms)]
         sweep_steps.append({"start": start, "step": step, "count": count,
                             "blip_ms": blip_ms, "out": out})
+
+    # --- low-rate envelope path (fade clamp -> _linspace num==1) -----------
+    # fade = max(1, int(rate*0.003)); for rate < ~667 it pins to 1, which drives
+    # _linspace(.,.,1) -- the num==1 div-by-zero guard (TS src/sound.ts:106-109,
+    # numpy returns array([start])).  No real AudioContext opens this low, so it
+    # is dumped from a THROWAWAY _Sfx with _mix_rate=600 (the 44100 battery above
+    # is left untouched); the TS test sets the same _mix_rate and asserts the
+    # identical int16 plane.  (n>2*fade still holds at 600, so the envelope runs.)
+    lr = sound._Sfx()
+    lr._mix_rate = 600
+    LOWRATE_BATT = [(100, 20), (30, 18), (200, 5), (2000, 10), (440, 12)]
+    lowrate = []
+    for (freq, ms) in LOWRATE_BATT:
+        plane = _left(lr._square_array(freq, ms))
+        lowrate.append({"rate": 600, "freq": freq, "ms": ms,
+                        "n": len(plane), "plane": plane})
 
     # --- _fly_freq_for: POS (floored at 50) + VEL (hypot), with clamps ----
     class _P:
@@ -296,6 +323,7 @@ def dump_sound():
         "sweep_steps": sweep_steps,
         "fly": fly,
         "events": events,
+        "lowrate": lowrate,
     }
     _write("sound", payload)
     nsamp = (sum(s["n"] for s in square) + sum(s["n"] for s in sweep)

@@ -14,3 +14,7 @@ visual/out/
 # Original game assets (Wendell Hicken's): the user chose (2026-06-26) to BUNDLE
 # them so the published build plays the originals out of the box.  They remain his
 # property; this is a non-commercial tribute.  public/assets/ is intentionally TRACKED.
+
+# coverage + browser-gate generated output
+coverage/
+test-browser/out/

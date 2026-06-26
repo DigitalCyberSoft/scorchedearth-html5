@@ -550,12 +550,15 @@ export class Sfx {
       // 100 iterations (a warble), gated.  FACT formula.  RECON: a short run of
       // pseudo-random blips (a fixed pattern so the buffer caches).
       const seq: Tone[] = [];
-      let f = 1000;
+      // deterministic glibc LCG.  BigInt is REQUIRED for parity with sound.py:
+      // f*1103515245 exceeds 2^53 once f>~2^22, so Number math silently drops
+      // low bits BEFORE the 31-bit mask and desyncs the warble after the first
+      // step (Number gives 4200.. where the exact-int oracle gives 10800..).
+      // (f*1103515245 + 12345) & 0x7fffffff in big-int matches scorch.sound.
+      let f = 1000n;
       for (let i = 0; i < 12; i++) {
-        // deterministic LCG.  Use Number math with a 31-bit mask; the constants
-        // and modulo match sound.py's (f*1103515245 + 12345) & 0x7fffffff.
-        f = ((f * 1103515245 + 12345) >>> 0) & 0x7fffffff;
-        seq.push([(f % 100) * 100 + 1000, 10]);
+        f = (f * 1103515245n + 12345n) & 0x7fffffffn;
+        seq.push([Number(f % 100n) * 100 + 1000, 10]);
       }
       return this._play_tones(seq, gate);
     }

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Scorch HTML5 - Browser Render-Crash Harness</title>
+    <!-- src/assets.ts builds RELATIVE urls ("assets/<name>", assets.ts:25,63).
+         This page is served at /test-browser/harness.html, so without a base the
+         fetches would resolve to /test-browser/assets/... (404). Pin the document
+         base to the server root so `assets/FOO` -> /assets/FOO (vite serves
+         public/assets at /assets), exactly as the app's index.html gets at root. -->
+    <base href="/" />
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; background: #111; }
+      #game { display: block; image-rendering: pixelated; }
+    </style>
+  </head>
+  <body>
+    <!-- The REAL backbuffer the app presents to (main.ts _present blits onto
+         #game). 1024x768 logical, same as cfg.resolution. -->
+    <canvas id="game" width="1024" height="768"></canvas>
+    <!-- Absolute path so it loads regardless of the <base> override. -->
+    <script type="module" src="/test-browser/harness.ts"></script>
+  </body>
+</html>

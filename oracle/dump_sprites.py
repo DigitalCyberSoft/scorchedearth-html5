@@ -118,6 +118,18 @@ def main():
         **surf_arrays(s),
     }
 
+    # --- 3c. draw_tank with an INT color and NO pal -> _VIS_RGB fallback path
+    #        (the resolveColor branch the palidx case does not reach). ---
+    s = pygame.Surface(TANK_SURF, pygame.SRCALPHA)
+    s.fill((0, 0, 0, 0))
+    sprites.draw_tank(s, 24, 30, 0, 3, 90)  # int color 3, no pal -> _VIS_RGB[3]
+    out["draw_tank_intcolor_nopal"] = {
+        "design": 0,
+        "color_index": 3,
+        "angle": 90,
+        **surf_arrays(s),
+    }
+
     # --- 4. draw_tank_icon_cell: every design, grayed and not, in a real box. ---
     cell_cases = []
     box = pygame.Rect(4, 4, 40, 32)
@@ -156,6 +168,16 @@ def main():
         "width": sprites.font_text_width("Scorched Earth 1.5!"),
         **surf_arrays(sprites.render_text("Scorched Earth 1.5!")),
     }
+    # font_text_width over strings WITH the `~` colour-escape (consumes no width,
+    # FUN_5589_0b87) and font_glyph_width over codes WITHOUT a glyph (absent -> 0,
+    # faithful to the binary's blank stubs).
+    out["font_text_width_cases"] = [
+        [s, sprites.font_text_width(s)]
+        for s in ["", "~", "a~b", "ab", "Scorched~Earth", "S", "c"]
+    ]
+    out["font_glyph_width_cases"] = [
+        [code, sprites.font_glyph_width(code)] for code in [1, 7, 34, 65, 300, 0]
+    ]
 
     # --- 6. The default mouse cursor (geometry + a scaled variant). ---
     cur, hot = sprites.get_cursor()
@@ -186,6 +208,38 @@ def main():
             }
         )
     out["title_mountain"] = mtn_cases
+
+    # --- 9. get_tank_icons: the default-color batteries (appearance previews).
+    #        Drives the sizing math (padTop/w/h/px/py) + tankBodyPixels per color. ---
+    icon_batteries = []
+    for idx in (0, 6):
+        surfs = sprites.get_tank_icons(idx=idx)
+        icon_batteries.append(
+            {
+                "idx": idx,
+                "count": len(surfs),
+                "icons": [surf_arrays(su) for su in surfs],
+            }
+        )
+    out["get_tank_icons"] = icon_batteries
+
+    # --- 10. Pure (non-Surface) introspection helpers (DOM-free; assert direct). ---
+    out["tank_design_wheels"] = [
+        [i, bool(sprites.tank_design_wheels(i))] for i in range(-1, 8)
+    ]
+    sil_cases = []
+    for i in list(range(sprites.NUM_TANK_DESIGNS)) + [99]:
+        w, h, local = sprites.tank_silhouette(i)
+        sil_cases.append(
+            {
+                "idx": i,
+                "w": int(w),
+                "h": int(h),
+                "local": sorted("%d,%d" % (x, y) for (x, y) in local),
+            }
+        )
+    out["tank_silhouette"] = sil_cases
+    out["font_codes"] = list(sprites.font_codes())
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as fh:
