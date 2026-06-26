@@ -4,6 +4,10 @@ A browser reimplementation of **Scorched Earth v1.5** (1995, DOS) by **Wendell H
 "The Mother of All Games" - running natively on TypeScript + Canvas2D + Web Audio.
 No plugins, no WASM, no Python or DOS runtime: open it and play.
 
+### Play it now: https://digitalcybersoft.github.io/scorchedearth-html5/
+
+Nothing to install - it is a static HTML5 page that runs in the browser.
+
 It reproduces the original's turn-based tank artillery - destructible terrain, the
 weapon shop, the computer players, the physics and wind, the economy and scoring -
 reconstructed function-for-function and verified against the original's behavior.
@@ -46,19 +50,28 @@ The verification:
 
 The original binary is never run by anything in this repository.
 
-## Running
+## Play
 
-```bash
-npm install
-npm run dev                 # http://localhost:5173
-# or a production build:
-npm run build && npm run preview
-```
+Open **https://digitalcybersoft.github.io/scorchedearth-html5/** in any modern browser.
+There is nothing to install - it is a static HTML5 page (Canvas2D + Web Audio +
+JavaScript). A short loading bar fetches the assets, then the menu appears.
 
 Controls: Left/Right aim the turret, Up/Down adjust power, Tab cycles weapons,
 Space or Enter fires, number keys select a tank, F11 toggles fullscreen, Esc backs
 out. The menus, the weapon shop, and the in-game control panel (battery, parachute,
 shield) are mouse-driven.
+
+## Building from source (developers only)
+
+The game is written in TypeScript and compiled **once** to the browser JavaScript that
+ships above; players never run any of this. It is only for modifying the code.
+
+```bash
+npm install
+npm run dev          # dev server at http://localhost:5173
+npm run build        # static bundle into dist/ (what GitHub Pages serves)
+npm test             # the 15,064 differential tests against the Python oracle
+```
 
 ## The original assets
 

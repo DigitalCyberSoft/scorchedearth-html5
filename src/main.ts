@@ -1326,6 +1326,23 @@ function _installInput(canvas: HTMLCanvasElement): void {
  * 10 .MTN names via assets.listMtnFiles + bytes for the default title mountain;
  * SCORCH.ICO (icon) when the sprites bundle decodes it.  All via src/assets.ts.
  */
+// ---------------------------------------------------------------------------
+// Preloader (the index.html #loading overlay): advanced as boot fetches assets,
+// removed once the first frame is on screen.  No-ops outside the browser (the
+// vitest import of this module has no document), like the auto-boot guard below.
+// ---------------------------------------------------------------------------
+function _bootProgress(frac: number, label: string): void {
+  if (typeof document === "undefined") return;
+  const bar = document.getElementById("loading-bar") as HTMLElement | null;
+  const pct = document.getElementById("loading-pct");
+  if (bar) bar.style.width = `${Math.round(Math.max(0.08, Math.min(1, frac)) * 100)}%`;
+  if (pct) pct.textContent = label;
+}
+function _hideLoader(): void {
+  if (typeof document === "undefined") return;
+  document.getElementById("loading")?.classList.add("done");
+}
+
 export async function boot(): Promise<void> {
   diag.setup_logging();
   // 1. query params (the browser's argv).
@@ -1336,6 +1353,7 @@ export async function boot(): Promise<void> {
 
   // 2. config.
   const cfg = Config.load(_loadConfigText());
+  _bootProgress(0.15, "Loading taunts…");
 
   // 3. ASSET BOOT.  Talk speech files: resolve the cfg's attack/die filenames to
   //    the shipped uppercase data files, fetch latin-1, build the talk pools.
@@ -1386,6 +1404,7 @@ export async function boot(): Promise<void> {
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     );
     diag.log.info("assets: %d .MTN files, byte source + %d terrain ranges wired", names.length, mtnBytes.size);
+    _bootProgress(0.85, "Loading sprites…");
   } catch (e) {
     diag.log.warning("assets: MTN preload failed (%s)", String(e));
   }
@@ -1404,6 +1423,7 @@ export async function boot(): Promise<void> {
     setRenderSprites(_sprites as never);
     setScreensSprites(_sprites as never);
     diag.log.info("assets: sprites bundle wired into render + screens");
+    _bootProgress(0.97, "Starting…");
   } else {
     diag.log.warning("assets: no sprites bundle wired; sprite cells render empty (chrome only)");
   }
@@ -1436,9 +1456,14 @@ export async function boot(): Promise<void> {
   // when App.step returns false (running=False).  An exception out of step()
   // propagates (the boundary already logged it) and halts the loop, surfacing the
   // crash rather than spinning a broken frame.
+  let _firstFrame = true;
   const frame = (nowMs: number): void => {
     const events = _eventQueue.splice(0, _eventQueue.length);
     const cont = app.step(nowMs, events);
+    if (_firstFrame) {
+      _firstFrame = false;
+      _hideLoader(); // the first menu frame is on screen -> drop the preloader
+    }
     if (cont) {
       requestAnimationFrame(frame);
     } else {
