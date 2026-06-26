@@ -1731,7 +1731,7 @@ export class GameState {
       if (proj.contact && beh === "digger") {
         const r = pyInt(wb.eff_radius(this as unknown as wb.BState, proj.weapon));
         this.terrain.carve_circle(x, y, r);
-        this.add_explosion(x, y, r, true);
+        this.add_explosion(x, y, r, { dirt_only: true });
         proj.active = false;
         return;
       }
@@ -1913,7 +1913,13 @@ export class GameState {
   static EXPLO_STAMP_HOLD = 3; // port hold for the single-pass stamp (visual)
   static NUKE_FLASH_FRAMES = 129; // FUN_3770_041d.c:48  for iVar2=1; iVar2<0x82
 
-  add_explosion(x: number, y: number, r: number, dirt_only = false, nuke = false): void {
+  add_explosion(x: number, y: number, r: number, kw?: { dirt_only?: boolean; nuke?: boolean }): void {
+    // 4th arg is an OPTIONS OBJECT (the damage.State / DState contract + the test
+    // mocks): add_explosion(x,y,r,{dirt_only?,nuke?}).  weapon_behaviors passes
+    // {nuke:true}; the prior positional (dirt_only,nuke) bound that object to
+    // `dirt_only` and LOST the nuke flag -> nukes rendered as a dirt stamp.
+    const dirt_only = kw?.dirt_only ?? false;
+    const nuke = kw?.nuke ?? false;
     r = Math.max(2, pyInt(r));
     // EXPAND step is 1 below 0x28 (40), else 2 (FUN_4d1e_015a.c:38-43).  The nuke
     // engine steps by 1 for the whole grow regardless of R.
@@ -1997,18 +2003,21 @@ export class GameState {
     x: number,
     y: number,
     top: number,
-    color = 15,
-    stride = 6,
-    scatter = 1,
+    kw?: { color?: number; stride?: number; scatter?: number },
   ): void {
     // Register the RISING tank-death / retreat ASCENSION tile (FUN_3ef5_029a:60-77).
+    // The 4th arg is an OPTIONS OBJECT -- the death.ts DState contract and the
+    // death.test.ts mock both call it as add_death_fountain(x,y,top,{color,stride,
+    // scatter}).  The prior positional (color,stride,scatter) silently bound the
+    // object to `color` -> pyInt(object)=NaN -> f.color=NaN -> _draw_death_tiles'
+    // lutGet(active, NaN) was undefined and set_at crashed on every kill.
     this.death_fountains.push({
       col: pyInt(x),
       y: pyInt(y),
       top: pyInt(top),
-      color: pyInt(color),
-      stride: pyInt(stride),
-      scatter: pyInt(scatter),
+      color: pyInt(kw?.color ?? 15),
+      stride: pyInt(kw?.stride ?? 6),
+      scatter: pyInt(kw?.scatter ?? 1),
     });
   }
 
