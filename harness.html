@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Scorch HTML5 - Visual Regression Harness</title>
+    <link rel="icon" href="data:," />
+
+    <style>
+      html, body { margin: 0; background: #222; }
+      #game { display: block; image-rendering: pixelated; }
+    </style>
+  </head>
+  <body>
+    <!-- Visual regression gate harness page. Lives at project ROOT so that the
+         relative `assets/<name>` fetches in src/assets.ts resolve to /assets/...
+         (vite serves public/assets at /assets). The harness module and the
+         shared scenario spec live in visual/ and are referenced by absolute
+         path so the gate machinery stays out of the app's src/ tree. -->
+    <canvas id="game" width="1024" height="768"></canvas>
+    <script type="module" src="/visual/harness.ts"></script>
+  </body>
+</html>

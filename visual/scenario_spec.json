@@ -1,0 +1,29 @@
+{
+  "_doc": "Single source of truth for the visual regression gate. Read identically by render_python.py (oracle) and harness.ts (TS port). Each scenario builds a GameState DIRECTLY on both sides (no menu flow) so a frame diff is attributable to RENDERING, not state divergence. W/H fixed at 1024x768. cfg.MAX_WIND=0 pins wind (and kills wind RNG draws). SKY is pinned per scenario. Two HUMAN players (ai_class=0) with tank_icon 0 and 1. BOTH sides set gs.mtn_ranges=[] to force the procedural _midpoint terrain (the .MTN _from_mtn decoder is a separate per-port codepath whose cross-port byte-equivalence is NOT what this gate measures; rendering parity is). exact=true scenarios use deterministic skies (PLAIN/SUNSET/STORMY/CAVERN: no render-time RNG) and are byte-compared on the WORLD region. exact=false (STARS) scatters stars via np.random (Python) vs Math.random (TS) at RENDER time -> EXPECTED to differ, reported but excluded from the world verdict.",
+  "width": 1024,
+  "height": 768,
+  "config": {
+    "SOUND": "OFF",
+    "TALKING_TANKS": "OFF",
+    "FLY_SOUND": "OFF",
+    "INITIAL_CASH": 0,
+    "MAX_WIND": 0,
+    "MAXROUNDS": 10,
+    "FALLING_TANKS": "ON"
+  },
+  "roster": [
+    ["Player 1", 0, 0, 0],
+    ["Player 2", 0, 0, 1]
+  ],
+  "scenarios": [
+    { "name": "plain_s1",   "seed": 1,    "sky": "PLAIN",  "exact": true },
+    { "name": "plain_s2",   "seed": 2,    "sky": "PLAIN",  "exact": true },
+    { "name": "plain_s777", "seed": 777,  "sky": "PLAIN",  "exact": true },
+    { "name": "plain_s9001","seed": 9001, "sky": "PLAIN",  "exact": true },
+    { "name": "sunset_s3",  "seed": 3,    "sky": "SUNSET", "exact": true },
+    { "name": "sunset_s42", "seed": 42,   "sky": "SUNSET", "exact": true },
+    { "name": "stormy_s5",  "seed": 5,    "sky": "STORMY", "exact": true },
+    { "name": "cavern_s7",  "seed": 7,    "sky": "CAVERN", "exact": true },
+    { "name": "stars_s11",  "seed": 11,   "sky": "STARS",  "exact": false }
+  ]
+}

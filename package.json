@@ -1,0 +1,22 @@
+{
+  "name": "scorchedearth-html5",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser (TypeScript + Canvas + Web Audio) port of Scorched Earth v1.5, differential-verified against the Python port.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.0",
+    "playwright": "^1.61.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}

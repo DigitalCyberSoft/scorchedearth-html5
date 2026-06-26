@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.vite/
+*.log
+
+# Oracle vectors are generated from the Python port; regenerate with
+# oracle/dump_*.py rather than committing large golden blobs.
+oracle/vectors/
+
+# Phase-3 visual-gate generated output (ref/ts/diff PNGs + RGBA + report); the gate
+# SOURCE (visual/*.py|ts|mjs|sh, scenario_spec.json) is tracked, the output regenerates.
+visual/out/
+
+# Original game assets (Wendell Hicken's): the user chose (2026-06-26) to BUNDLE
+# them so the published build plays the originals out of the box.  They remain his
+# property; this is a non-commercial tribute.  public/assets/ is intentionally TRACKED.
