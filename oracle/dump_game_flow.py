@@ -1094,12 +1094,280 @@ def scen_explo_tail():
     return out
 
 
+# ===========================================================================
+# Scenario U: narrow GUARD / early-return edge branches the per-behaviour
+# batteries above never reach -- the wind-jitter zero-MAX path, the SYNC/SIM turn
+# loop guards (human wait / queue-drop / win mid-loop / dead-skip / auto-defense /
+# no-rec), the off-field detonate split (floor / WRAP side / tracer-lose / digger
+# fizzle-vs-explode), the mag-deflect skip gates (vx==0 / |dx|>15), a digger
+# fizzling on a shield, a contact sandhog, the out-of-chutes settle, and the
+# lightning-band no-op.  Each row is a compact deterministic observable (ints /
+# bools / a few floats) the TS mirror reproduces EXACTLY; internal methods are
+# driven directly with a built precondition (the scen_effects / scen_arm_edges /
+# scen_mag_step precedent), each from a fresh build so the rng stays pinned.
+# ===========================================================================
+def scen_edges():
+    import copy
+    from scorch import physics
+    from scorch import palette as PAL
+    P2 = [("A", C.AI_HUMAN, 0, 0), ("B", C.AI_HUMAN, 0, 0)]
+    AI2 = [("AI1", C.AI_SHOOTER, 0, 0), ("AI2", C.AI_SHOOTER, 0, 0)]
+    AI3 = [("AI1", C.AI_SHOOTER, 0, 0), ("AI2", C.AI_SHOOTER, 0, 0),
+           ("AI3", C.AI_SHOOTER, 0, 0)]
+    rows = {}
+
+    def offf(mode, slot, px, py, sx, sy, blast=None):
+        # `mode` is the live wall sub-mode the boundary handler sees (cfg.live_elastic,
+        # 0..5; 5 == WRAP detonate).  Set numerically -- the ELASTIC *token* table is
+        # not 1:1 with the wall-mode numbers (token "WRAP" parses to 1, not 5).
+        gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0), 1, P2)
+        gs.new_game()
+        gs.cfg.live_elastic = mode
+        p = physics.launch(gs.tanks[0], gs.cfg, weapons.ITEMS[slot])
+        if blast is not None:
+            # COPY first: physics.launch shares the weapons.ITEMS[slot] reference,
+            # so mutating p.weapon.blast in place would corrupt the GLOBAL weapon
+            # table (and every later scenario's digger).  Deep-copy isolates it.
+            p.weapon = copy.deepcopy(p.weapon)
+            p.weapon.blast = blast
+        p.px, p.py, p.sx, p.sy = float(px), float(py), int(sx), int(sy)
+        p.owner = gs.tanks[0]
+        gs.last_landing = None
+        ne = len(gs.explosions)
+        gs._resolve_off_field(p)
+        ll = list(gs.last_landing) if gs.last_landing is not None else None
+        return {"last_landing": ll, "active": bool(p.active),
+                "n_expl": len(gs.explosions) - ne}
+
+    # --- _perturb_wind with MAX_WIND<=0 -> wind pinned 0 (game.ts:511-513) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        CHANGING_WIND="ON"), 1, P2)
+    gs.new_game()
+    gs.cfg.wind = 50                                  # force a nonzero pre-value
+    gs._perturb_wind()                                # mw<=0 -> wind=0, return
+    rows["perturb_zero"] = {"wind": gs.cfg.wind}
+
+    # --- SYNC re-aim head perturbs the wind (game.ts:1073-1074) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=200,
+                        CHANGING_WIND="ON", PLAY_MODE="SYNCHRONOUS"), 7, AI2)
+    gs.new_game()
+    gs._sync_start_volley()                           # CHANGING_WIND -> _perturb_wind
+    rows["sync_wind"] = {"wind": gs.cfg.wind, "phase": gs.phase}
+
+    # --- SIM AI cadence perturbs the wind as a shot resolves (game.ts:1290-1291) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=200,
+                        CHANGING_WIND="ON", PLAY_MODE="SIMULTANEOUS"), 7, AI2)
+    gs.new_game()
+    for t in gs.tanks:                                # force every recock timer to fire
+        gs._sim[t.player_index]["timer"] = 0.0
+    gs._sim_update(DT)
+    rows["sim_wind"] = {"wind": gs.cfg.wind, "phase": gs.phase}
+
+    # --- SYNC_AIM parks on a human shooter (game.ts:1150-1151) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SYNCHRONOUS"), 1, P2)
+    gs.new_game()
+    seq = [[gs.phase, gs.current_shooter.player_index if gs.current_shooter else -1]]
+    for _ in range(3):
+        gs.update(DT)                                 # _sync_collect: human -> return
+        seq.append([gs.phase,
+                    gs.current_shooter.player_index if gs.current_shooter else -1])
+    rows["sync_human_wait"] = {"seq": seq}
+
+    # --- _sync_collect parks while a human's lock is pending (game.ts:1150-1151) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SYNCHRONOUS"), 1, P2)
+    gs.new_game()
+    gs.phase = G.SYNC_AIM                              # the collect frame...
+    gs.current_shooter = gs.tanks[0]                   # ...with a human as the shooter
+    q0 = list(gs._sync_queue)
+    gs._sync_collect(DT)                               # human -> return, no advance/tick
+    rows["sync_collect_human"] = {
+        "phase": gs.phase,
+        "cs": gs.current_shooter.player_index if gs.current_shooter else -1,
+        "queue_same": list(gs._sync_queue) == q0}
+
+    # --- _sync_advance win short-circuit (game.ts:1088-1090) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SYNCHRONOUS", SCORING="STANDARD"), 1, P2)
+    gs.new_game()
+    gs.current_shooter = None
+    D.kill_tank(gs, gs.tanks[1])
+    gs._sync_advance()
+    rows["sync_advance_win"] = {"phase": gs.phase, "round_index": gs.round_index}
+
+    # --- _sync_advance drops a dead queue head (game.ts:1097-1098) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SYNCHRONOUS"), 1, AI3)
+    gs.new_game()
+    gs.tanks[0].alive = False                         # 2 alive -> no win; head 0 dead
+    gs._sync_locks = {}
+    gs._sync_queue = [0, 1, 2]
+    gs.current_shooter = None
+    gs._sync_advance()                                # while-loop shifts the dead 0
+    rows["sync_drop_dead"] = {
+        "cs": gs.current_shooter.player_index if gs.current_shooter else -1,
+        "queue": list(gs._sync_queue), "phase": gs.phase}
+
+    # --- _sync_volley win after settle (game.ts:1202) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SYNCHRONOUS", SCORING="STANDARD"), 1, P2)
+    gs.new_game()
+    gs.phase = G.SYNC_VOLLEY
+    gs.timer = 0.0
+    gs.projectiles = []
+    gs.explosions = []
+    gs.beams = []
+    gs.plasma_rings = []
+    gs.death_fountains = []
+    gs.throe_fx = []
+    gs.tanks[1].alive = False                         # last tank standing
+    gs.tanks[1].health = 0
+    gs._sync_volley(DT)                               # _do_settle -> win -> _end_round
+    rows["sync_volley_win"] = {"phase": gs.phase, "round_index": gs.round_index}
+
+    # --- _sim_begin_round skips a dead tank (game.ts:1217-1218) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SIMULTANEOUS"), 1, AI2)
+    gs.new_game()
+    gs.tanks[0].alive = False
+    gs._sim_begin_round()
+    rows["sim_begin_dead"] = {"sim_keys": sorted(gs._sim.keys())}
+
+    # --- _sim_begin_round Auto-Defense owner -> chute passive off (game.ts:1221) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SIMULTANEOUS"), 1, P2)
+    gs.new_game()
+    gs.tanks[0].inventory[weapons.SLOT_AUTO_DEFENSE] = 1
+    gs._sim_begin_round()
+    rows["sim_begin_autodef"] = {
+        "parachute": [bool(t.parachute_deployed) for t in gs.tanks]}
+
+    # --- _sim_update win short-circuit (game.ts:1268-1270) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SIMULTANEOUS", SCORING="STANDARD"), 1, AI2)
+    gs.new_game()
+    D.kill_tank(gs, gs.tanks[1])
+    gs._sim_update(DT)
+    rows["sim_update_win"] = {"phase": gs.phase, "round_index": gs.round_index}
+
+    # --- _sim_update skips a tank with no _sim record (game.ts:1279-1280) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        PLAY_MODE="SIMULTANEOUS"), 1, AI2)
+    gs.new_game()
+    del gs._sim[gs.tanks[1].player_index]
+    gs._sim_update(DT)
+    rows["sim_update_no_rec"] = {
+        "phase": gs.phase,
+        "t1_proj": sum(1 for p in gs.projectiles if p.owner is gs.tanks[1])}
+
+    # --- MIRV contact trigger propagates to every child warhead (game.ts:1426-1429) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        FALLING_TANKS="OFF", CHANGING_WIND="OFF"), 1, P2)
+    gs.new_game()
+    gs.update(DT)
+    sh = gs.current_shooter
+    sh.inventory[6] = 5
+    sh.angle, sh.power, sh.selected_weapon = 70, 700, 6
+    sh.contact_trigger = True
+    gs.fire()
+    n = 0
+    while n < 400 and len(gs.projectiles) <= 1:
+        gs.update(DT)
+        n += 1
+    rows["mirv_contact"] = {"nproj": len(gs.projectiles),
+                            "contacts": [bool(p.contact) for p in gs.projectiles]}
+
+    # --- _resolve_off_field: floor / WRAP side+ceil / tracer-lose / digger (game.ts:1464-1497) ---
+    rows["offfield_floor"] = offf(0, 1, 300.0, 480.0, 300, 479)
+    rows["offfield_wrap"] = offf(5, 1, -3.0, 200.0, 0, 200)
+    rows["offfield_wrap_ceil"] = offf(5, 1, 200.0, -3.0, 200, 0)
+    rows["offfield_tracer"] = offf(0, 10, 300.0, 480.0, 300, 479)
+    rows["offfield_digger"] = offf(0, 20, 300.0, 480.0, 300, 479)
+    rows["offfield_digger_zero"] = offf(0, 20, 300.0, 480.0, 300, 479, blast=0)
+
+    # --- _mag_deflect skip gates: vx==0 / |dx|>15 (game.ts:1557-1562) ---
+    def magskip(dx, vx):
+        gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0), 1, P2)
+        gs.new_game()
+        sh, tg = gs.tanks[0], gs.tanks[1]
+        tg.x, tg.y = 300, 240
+        tg.shield_hp = 150
+        tg.shield_item = weapons.SLOT_MAG_DEFLECTOR
+        tg.shield_push = True
+        tg.shield_deflect = False
+        p = physics.launch(sh, gs.cfg, weapons.ITEMS[weapons.SLOT_BABY_MISSILE])
+        p.owner = sh
+        p.px, p.py = float(tg.x + dx), float(tg.y - 40)
+        p.sx, p.sy = tg.x + dx, tg.y - 40
+        p.vx, p.vy = float(vx), -0.5
+        before = p.vy
+        gs._mag_deflect(p)
+        return {"vy_before": before, "vy_after": p.vy}
+    rows["mag_vx0"] = magskip(-8, 0.0)               # in box but vx==0 -> skip
+    rows["mag_farx"] = magskip(-40, 1.0)             # |dx|>15 -> skip
+
+    # --- digger fizzles on a SHIELDED tank (game.ts:1675) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0), 1, P2)
+    gs.new_game()
+    tg = gs.tanks[1]
+    tg.shield_hp = 100
+    tg.shield_item = weapons.SLOT_SHIELD
+    p = physics.launch(gs.tanks[0], gs.cfg, weapons.ITEMS[20])
+    p.owner = gs.tanks[0]
+    hp0 = tg.shield_hp
+    gs._resolve_hit(p, ("tank", tg, tg.x, tg.y))
+    rows["digger_on_shield"] = {"active": bool(p.active),
+                                "shield_before": hp0, "shield_after": tg.shield_hp}
+
+    # --- contact-trigger sandhog detonates at the surface (game.ts:1740-1744) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0), 1, P2)
+    gs.new_game()
+    p = physics.launch(gs.tanks[0], gs.cfg, weapons.ITEMS[23])
+    p.owner = gs.tanks[0]
+    p.contact = True
+    x = gs.tanks[0].x
+    y = gs.terrain.column_top(x) + 1
+    gs._resolve_hit(p, ("terrain", None, x, y))
+    rows["contact_sandhog"] = {"active": bool(p.active),
+                               "last_landing": list(gs.last_landing)}
+
+    # --- settle: chute deploy that exhausts the last chute (game.ts:1860-1861) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0,
+                        FALLING_TANKS="ON"), 3, P2)
+    gs.new_game()
+    t0 = gs.tanks[0]
+    t0.parachute_deployed = True
+    t0.parachute_threshold = 0
+    t0.inventory[weapons.SLOT_PARACHUTE] = 1          # exactly one -> exhausted on deploy
+    gs.terrain.carve_circle(t0.x, t0.y + 30, 60)
+    gs._settle_tank(t0)
+    rows["settle_no_chute"] = {
+        "parachutes": t0.inventory[weapons.SLOT_PARACHUTE],
+        "deployed": bool(t0.parachute_deployed), "y": t0.y}
+
+    # --- _tick_lightning_band no-op while every flash is still staggered (game.ts:2231-2232) ---
+    gs = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0), 1,
+               [("A", C.AI_HUMAN, 0, 0)])
+    gs.new_game()
+    lo, hi = PAL.LIGHTNING_BAND_LO, PAL.LIGHTNING_BAND_HI
+    band_before = [[int(v) for v in gs.lut.table[i]] for i in range(lo, hi + 1)]
+    gs.add_flash(5, 10, (255, 255, 235), 4)           # stagger delay 4 -> frame -4 (<0)
+    gs._tick_lightning_band()                         # level stays 0 -> early return
+    band_after = [[int(v) for v in gs.lut.table[i]] for i in range(lo, hi + 1)]
+    rows["lightning_zero"] = {"frame": gs.flashes[0]["frame"],
+                              "band_before": band_before, "band_after": band_after}
+
+    return rows
+
+
 def main():
     payload = {
         "module": "game_flow",
         "field": [W, H],
         "lut_idx": LUT_IDX,
         "terr_x": TERR_X,
+        "edges": scen_edges(),
         "weapon_fire": scen_weapon_fire(),
         "death_fx": scen_death_fx(),
         "retreat": scen_retreat(),

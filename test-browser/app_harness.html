@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Scorch HTML5 - App-Drive Harness (main.ts coverage)</title>
+    <!-- assets.ts builds relative urls ("assets/<name>"); pin the base to the server
+         root so they resolve to /assets/... exactly like the shipping index.html. -->
+    <base href="/" />
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; background: #111; }
+    </style>
+  </head>
+  <body>
+    <!-- DELIBERATELY no <canvas id="game">: main.ts's auto-boot guard is
+         `getElementById("game") !== null`, so this page does NOT auto-boot the
+         shipping app.  app_harness.ts owns the App lifecycle (constructs + drives it)
+         so the App._act/_step/_draw branches the shallow boot play-through misses get
+         exercised under coverage. -->
+    <script type="module" src="/test-browser/app_harness.ts"></script>
+  </body>
+</html>

@@ -618,6 +618,24 @@ describe("ui: MainMenu value mutation (clamp / enum cycle / round(.,2) gravity)"
       expectMenuState(menuState(m), c.final, `${c.name} final`);
     });
   }
+
+  it("gravity adjust on a non-finite cfg value is NaN-safe (pyRoundN guard)", () => {
+    // _set_f rounds gravity to 2 decimals via pyRoundN, mirroring ui.py:68
+    // `round(d * 0.05, 2)`.  CPython's round() returns the value unchanged for a
+    // non-finite input (verified live: round(nan,2)==nan, round(inf,2)==inf), so the
+    // TS helper's `if (!Number.isFinite(x)) return x` (ui.ts:77-79) reproduces that
+    // rather than running the half-even/EPS scaling on NaN.  A real Config never
+    // holds NaN gravity, but the helper must stay total: poison the value and confirm
+    // the adjust leaves it NaN (no throw, no garbage) exactly as Python would.
+    const m = mkMenu({ MAXPLAYERS: 2 });
+    m.sel = m.rows.map((r) => r[0]).indexOf("gravity");
+    expect(m.sel).toBeGreaterThanOrEqual(0);
+    (m.cfg as { GRAVITY: number }).GRAVITY = NaN;
+    m._activate(1); // gravity row +1 step -> _set_f -> pyRoundN(NaN, 2)
+    expect(Number.isNaN(m.cfg.GRAVITY)).toBe(true);
+    m._activate(-1);
+    expect(Number.isNaN(m.cfg.GRAVITY)).toBe(true);
+  });
 });
 
 describe("ui: MainMenu.build_players (team assignment)", () => {

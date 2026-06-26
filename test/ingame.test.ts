@@ -490,6 +490,21 @@ describe("ingame: cycle_weapon (owned offensive rotation)", () => {
       expect(t.selected_weapon, `${c.name} sel_out`).toBe(c.sel_out);
     });
   }
+
+  it("empty owned set (no offensive ammo at all) -> null, selection unchanged", () => {
+    // _owned_offensive is empty ONLY for a tank whose has_ammo is false for every
+    // slot, including Baby Missile.  A real Tank can never reach that (objects.ts:263
+    // / objects.py:132 make slot 0 always firable), so this exercises cycle_weapon's
+    // degenerate-input guard (ingame.ts:535).  The oracle carries the identical guard
+    // (ingame.py:366 `if not owned: return None`); verified live against
+    // scorch.ingame.cycle_weapon(no-ammo tank) -> None with selection kept at 5.
+    const t = new MockTank({ selected_weapon: 5 });
+    t.has_ammo = (): boolean => false; // force EVERY slot out, slot 0 included
+    const st = new MockState({ tanks: [t], shooter: t });
+    expect(ingame.cycle_weapon(st, 1)).toBeNull();
+    expect(ingame.cycle_weapon(st, -1)).toBeNull();
+    expect(t.selected_weapon).toBe(5);
+  });
 });
 
 describe("ingame: Choose Target gate (needs_target / in_target_mode / _in_choose_target)", () => {

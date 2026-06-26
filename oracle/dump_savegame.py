@@ -270,6 +270,10 @@ def _battery():
     # --- (7) all-cfg-non-default: every enum/int/float field off its default
     def m7(gs):
         gs.terrain.grid = _ascending_grid(8, 8, off=42)
+        # SIMULTANEOUS play records queued sim_keys per tank; populate one so the
+        # round-trip + byte battery exercise the non-empty sim_keys restore path
+        # (savegame.applyTank's `if d.sim_keys && d.sim_keys.length`).
+        gs.tanks[0].sim_keys = [3, 5, 7]
     cases.append(("cfg_all_nondefault", _mk({
         "MAXPLAYERS": 4, "MAXROUNDS": 25, "ARMS": 2, "PLAY_MODE": "SIMULTANEOUS",
         "PLAY_ORDER": "ROUND-ROBIN", "TEAM_MODE": "VICIOUS",

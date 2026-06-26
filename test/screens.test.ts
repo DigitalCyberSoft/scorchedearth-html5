@@ -51,6 +51,7 @@ import { describe, it, expect } from "vitest";
 import * as screens from "../src/screens";
 import * as weapons from "../src/weapons";
 import * as palette from "../src/palette";
+import * as pygame from "../src/pygame";
 import { Economy } from "../src/economy";
 import type { EconomyConfig, EconomyTank } from "../src/economy";
 import { Config } from "../src/config";
@@ -530,6 +531,32 @@ describe("screens: ShopScreen._category_click (toggle + cursor reset + relist)",
       expect(self.scroll, `click #${i} scroll`).toBe(c.scroll);
       expect(self.items.length, `click #${i} n_items`).toBe(c.n_items);
     }
+  });
+});
+
+describe("screens: ShopScreen.handle (grid-scan break + no-hit fall-through)", () => {
+  it("a left-click with an empty item list breaks the scan and returns null", () => {
+    // handle()'s row-click scan (screens.ts:1671-1684) breaks when scroll+r reaches
+    // the end of items[], and otherwise falls through with no selection change.  With
+    // items==[] the first row index is already past the end, so the break (1676) AND
+    // the post-loop fall-through (1684) both execute.  The font-measured Panel is the
+    // DOM boundary the Object.create seam bypasses, so panel.handle is stubbed to
+    // null here -- the unit under test is the geometry loop, not the widget routing.
+    const econ = makeEcon(4);
+    const tank = new TankMock({ cash: 1000 });
+    const self = shopSeam({ econ, tank, category: 0, sel_row: 2, scroll: 0 });
+    self.items = [];
+    const poke = self as unknown as {
+      panel: { handle(e: unknown): unknown }; _grid_top: number; _list_x: number; _list_right: number;
+    };
+    poke.panel = { handle: () => null };
+    poke._grid_top = 120;
+    poke._list_x = 40;
+    poke._list_right = 420;
+    const evt = { type: pygame.MOUSEBUTTONDOWN, button: 1, pos: [200, 300] as [number, number] };
+    const r = self.handle(evt as unknown as Parameters<typeof self.handle>[0]);
+    expect(r).toBeNull();
+    expect(self.sel_row).toBe(2); // no row hit -> selection unchanged
   });
 });
 

@@ -466,8 +466,10 @@ async function _idbWrite(basename: string, bytes: Uint8Array): Promise<void> {
 }
 
 /** A synchronous SaveStoreProvider backed by an in-memory mirror of the IndexedDB
- *  catalog, with async write-through.  Hydrated at boot via hydrate(). */
-class IndexedDbSaveStore implements SaveStoreProvider {
+ *  catalog, with async write-through.  Hydrated at boot via hydrate().  Exported so
+ *  the browser coverage harness can drive the real hydrate/write IndexedDB paths
+ *  (the shipping app constructs one in boot()); not used by any other module. */
+export class IndexedDbSaveStore implements SaveStoreProvider {
   private _mirror = new Map<string, Uint8Array>();
 
   /** Seed the mirror from IndexedDB (call once before the menu). */
@@ -1176,14 +1178,21 @@ function _setWindowIcon(icon: pygame.Surface): void {
 /** F11 / Alt+Enter -> the Fullscreen API (pygame.display.toggle_fullscreen). */
 function _toggleFullscreenApi(wantFull: boolean): void {
   try {
+    let p: Promise<void> | undefined;
     if (wantFull) {
       const el = (document.getElementById("game") as HTMLElement | null) ?? document.documentElement;
-      void el.requestFullscreen?.();
+      p = el.requestFullscreen?.();
     } else {
-      void document.exitFullscreen?.();
+      p = document.exitFullscreen?.();
     }
+    // requestFullscreen / exitFullscreen return a Promise that REJECTS when the host
+    // blocks the change (no user gesture, inactive document, already in the target
+    // state).  Swallow that rejection the same way the surrounding try swallows a
+    // synchronous throw -- both are the documented "blocked by the host" case; an
+    // unhandled rejection would otherwise surface as a spurious error.
+    void p?.catch(() => {});
   } catch {
-    /* fullscreen may be blocked by the host; non-fatal. */
+    /* a SYNCHRONOUS throw from the fullscreen call (inactive document); non-fatal. */
   }
 }
 

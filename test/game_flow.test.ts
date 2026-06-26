@@ -43,6 +43,8 @@ import * as C from "../src/constants";
 import * as weapons from "../src/weapons";
 import * as damage from "../src/damage";
 import * as physics from "../src/physics";
+import * as palette from "../src/palette";
+import { TalkConfig } from "../src/talk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VECTORS = join(__dirname, "..", "oracle", "vectors", "game_flow.json");
@@ -131,8 +133,38 @@ type ExploTail = {
   firewall_expire: Array<{ n: number; active: boolean }>;
 };
 
+type OffField = { last_landing: [number, number] | null; active: boolean; n_expl: number };
+type MagSkip = { vy_before: number; vy_after: number };
+type EdgesVec = {
+  perturb_zero: { wind: number };
+  sync_wind: { wind: number; phase: string };
+  sim_wind: { wind: number; phase: string };
+  sync_human_wait: { seq: Array<[string, number]> };
+  sync_collect_human: { phase: string; cs: number; queue_same: boolean };
+  sync_advance_win: { phase: string; round_index: number };
+  sync_drop_dead: { cs: number; queue: number[]; phase: string };
+  sync_volley_win: { phase: string; round_index: number };
+  sim_begin_dead: { sim_keys: number[] };
+  sim_begin_autodef: { parachute: boolean[] };
+  sim_update_win: { phase: string; round_index: number };
+  sim_update_no_rec: { phase: string; t1_proj: number };
+  mirv_contact: { nproj: number; contacts: boolean[] };
+  offfield_floor: OffField;
+  offfield_wrap: OffField;
+  offfield_wrap_ceil: OffField;
+  offfield_tracer: OffField;
+  offfield_digger: OffField;
+  offfield_digger_zero: OffField;
+  mag_vx0: MagSkip;
+  mag_farx: MagSkip;
+  digger_on_shield: { active: boolean; shield_before: number; shield_after: number };
+  contact_sandhog: { active: boolean; last_landing: [number, number] };
+  settle_no_chute: { parachutes: number; deployed: boolean; y: number };
+  lightning_zero: { frame: number; band_before: number[][]; band_after: number[][] };
+};
 type GameFlowVectors = {
   module: string; field: [number, number]; lut_idx: number[]; terr_x: number[];
+  edges: EdgesVec;
   weapon_fire: WeaponCase[]; death_fx: StepCase[]; retreat: StepCase[];
   mass_kill: MassKillCase[]; win_loss: StepCase[]; shop_cycle: ShopCase[];
   changing_wind: WindCase[]; shields: ShieldCase[]; sync_ai_volley: SyncCase[];
@@ -1300,6 +1332,292 @@ describe("game_flow: explosion/firewall animation tails", () => {
 });
 
 // ===========================================================================
+// Scenario U(diff): narrow GUARD / early-return edge branches, differential vs
+// oracle/dump_game_flow.scen_edges.  Each mirrors the Python setup EXACTLY (same
+// build seed, same direct internal-method call) and asserts the same compact
+// observable.  Drives the wind-jitter zero path, the SYNC/SIM turn-loop guards,
+// the off-field detonate split, the mag-deflect skip gates, a digger fizzling on
+// a shield, a contact sandhog, the out-of-chutes settle, and the lightning no-op.
+// ===========================================================================
+describe("game_flow: coverage edge branches (differential)", () => {
+  const E = vec.edges;
+  const P2: Player[] = [["A", C.AI_HUMAN, 0, 0], ["B", C.AI_HUMAN, 0, 0]];
+  const AI2: Player[] = [["AI1", C.AI_SHOOTER, 0, 0], ["AI2", C.AI_SHOOTER, 0, 0]];
+  const AI3: Player[] = [
+    ["AI1", C.AI_SHOOTER, 0, 0], ["AI2", C.AI_SHOOTER, 0, 0], ["AI3", C.AI_SHOOTER, 0, 0],
+  ];
+
+  function offf(
+    mode: number, slot: number, px: number, py: number, sx: number, sy: number,
+    blast?: number,
+  ): OffField {
+    // `mode` is the live wall sub-mode the boundary handler sees (cfg.live_elastic;
+    // 5 == WRAP detonate).  Set numerically -- the ELASTIC token table is not 1:1
+    // with the wall-mode numbers (token "WRAP" parses to 1, not 5).
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, P2);
+    gs.new_game();
+    gs.cfg.live_elastic = mode;
+    const p = physics.launch(gs.tanks[0], gs.cfg as unknown as physics.PhysicsCfg, weapons.ITEMS[slot]);
+    if (blast !== undefined) {
+      // clone first (physics.launch shares weapons.ITEMS[slot]; mutating in place
+      // would corrupt the global table) -- mirror dump_game_flow.offf's deepcopy.
+      p.weapon = Object.assign(Object.create(Object.getPrototypeOf(p.weapon)), p.weapon) as weapons.Item;
+      p.weapon.blast = blast;
+    }
+    p.px = px; p.py = py; p.sx = sx; p.sy = sy;
+    p.owner = gs.tanks[0];
+    gs.last_landing = null;
+    const ne = gs.explosions.length;
+    gs._resolve_off_field(p);
+    return { last_landing: gs.last_landing, active: p.active, n_expl: gs.explosions.length - ne };
+  }
+
+  it("_perturb_wind pins wind to 0 when MAX_WIND<=0 (511-513)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, CHANGING_WIND: "ON" }), 1, P2);
+    gs.new_game();
+    gs.cfg.wind = 50;
+    gs._perturb_wind();
+    expect(gs.cfg.wind).toBe(E.perturb_zero.wind);
+  });
+
+  it("SYNC re-aim head perturbs the wind (1073-1074)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 200, CHANGING_WIND: "ON", PLAY_MODE: "SYNCHRONOUS" }), 7, AI2);
+    gs.new_game();
+    gs._sync_start_volley();
+    expect(gs.cfg.wind, "sync wind").toBe(E.sync_wind.wind);
+    expect(gs.phase, "sync phase").toBe(E.sync_wind.phase);
+  });
+
+  it("SIM AI cadence perturbs the wind as a shot resolves (1290-1291)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 200, CHANGING_WIND: "ON", PLAY_MODE: "SIMULTANEOUS" }), 7, AI2);
+    gs.new_game();
+    for (const t of gs.tanks) gs._sim[t.player_index].timer = 0.0;
+    gs._sim_update(DT);
+    expect(gs.cfg.wind, "sim wind").toBe(E.sim_wind.wind);
+    expect(gs.phase, "sim phase").toBe(E.sim_wind.phase);
+  });
+
+  it("SYNC_AIM parks on a human shooter (1150-1151)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SYNCHRONOUS" }), 1, P2);
+    gs.new_game();
+    const seq: Array<[string, number]> = [
+      [gs.phase, gs.current_shooter ? gs.current_shooter.player_index : -1],
+    ];
+    for (let k = 0; k < 3; k++) {
+      gs.update(DT);
+      seq.push([gs.phase, gs.current_shooter ? gs.current_shooter.player_index : -1]);
+    }
+    expect(seq).toEqual(E.sync_human_wait.seq);
+  });
+
+  it("_sync_collect parks while a human's lock is pending (1150-1151)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SYNCHRONOUS" }), 1, P2);
+    gs.new_game();
+    gs.phase = "sync_aim";
+    gs.current_shooter = gs.tanks[0]; // a human shooter
+    const q0 = gs._sync_queue.slice();
+    gs._sync_collect(DT); // human -> early return, no advance/tick
+    expect(gs.phase).toBe(E.sync_collect_human.phase);
+    const cs = gs.current_shooter as { player_index: number } | null;
+    expect(cs ? cs.player_index : -1).toBe(E.sync_collect_human.cs);
+    expect(JSON.stringify(gs._sync_queue) === JSON.stringify(q0)).toBe(E.sync_collect_human.queue_same);
+  });
+
+  it("_sync_advance win short-circuit (1088-1090)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SYNCHRONOUS", SCORING: "STANDARD" }), 1, P2);
+    gs.new_game();
+    gs.current_shooter = null;
+    damage.kill_tank(gs as unknown as damage.State, gs.tanks[1] as unknown as damage.Tank);
+    gs._sync_advance();
+    expect(gs.phase).toBe(E.sync_advance_win.phase);
+    expect(gs.round_index).toBe(E.sync_advance_win.round_index);
+  });
+
+  it("_sync_advance drops a dead queue head (1097-1098)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SYNCHRONOUS" }), 1, AI3);
+    gs.new_game();
+    gs.tanks[0].alive = false;
+    gs._sync_locks = {};
+    gs._sync_queue = [0, 1, 2];
+    gs.current_shooter = null;
+    gs._sync_advance();
+    const cs = gs.current_shooter as { player_index: number } | null;
+    expect(cs ? cs.player_index : -1).toBe(E.sync_drop_dead.cs);
+    expect(gs._sync_queue).toEqual(E.sync_drop_dead.queue);
+    expect(gs.phase).toBe(E.sync_drop_dead.phase);
+  });
+
+  it("_sync_volley ends the round on the post-settle win (1202)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SYNCHRONOUS", SCORING: "STANDARD" }), 1, P2);
+    gs.new_game();
+    gs.phase = "sync_volley";
+    gs.timer = 0.0;
+    gs.projectiles = [];
+    gs.explosions = [];
+    gs.beams = [];
+    gs.plasma_rings = [];
+    gs.death_fountains = [];
+    gs.throe_fx = [];
+    gs.tanks[1].alive = false;
+    gs.tanks[1].health = 0;
+    gs._sync_volley(DT);
+    expect(gs.phase).toBe(E.sync_volley_win.phase);
+    expect(gs.round_index).toBe(E.sync_volley_win.round_index);
+  });
+
+  it("_sim_begin_round skips a dead tank (1217-1218)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS" }), 1, AI2);
+    gs.new_game();
+    gs.tanks[0].alive = false;
+    gs._sim_begin_round();
+    expect(Object.keys(gs._sim).map(Number).sort((a, b) => a - b)).toEqual(E.sim_begin_dead.sim_keys);
+  });
+
+  it("_sim_begin_round disables the passive chute for an Auto-Defense owner (1221)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS" }), 1, P2);
+    gs.new_game();
+    gs.tanks[0].inventory[weapons.SLOT_AUTO_DEFENSE] = 1;
+    gs._sim_begin_round();
+    expect(gs.tanks.map((t) => !!t.parachute_deployed)).toEqual(E.sim_begin_autodef.parachute);
+  });
+
+  it("_sim_update win short-circuit (1268-1270)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS", SCORING: "STANDARD" }), 1, AI2);
+    gs.new_game();
+    damage.kill_tank(gs as unknown as damage.State, gs.tanks[1] as unknown as damage.Tank);
+    gs._sim_update(DT);
+    expect(gs.phase).toBe(E.sim_update_win.phase);
+    expect(gs.round_index).toBe(E.sim_update_win.round_index);
+  });
+
+  it("_sim_update skips a tank with no _sim record (1279-1280)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS" }), 1, AI2);
+    gs.new_game();
+    delete gs._sim[gs.tanks[1].player_index];
+    gs._sim_update(DT);
+    expect(gs.phase).toBe(E.sim_update_no_rec.phase);
+    expect(gs.projectiles.filter((p) => p.owner === gs.tanks[1]).length).toBe(E.sim_update_no_rec.t1_proj);
+  });
+
+  it("MIRV contact trigger propagates to every child warhead (1426-1429)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, FALLING_TANKS: "OFF", CHANGING_WIND: "OFF" }), 1, P2);
+    gs.new_game();
+    gs.update(DT);
+    const sh = gs.current_shooter!;
+    sh.inventory[6] = 5;
+    sh.angle = 70; sh.power = 700; sh.selected_weapon = 6;
+    sh.contact_trigger = true;
+    gs.fire();
+    let n = 0;
+    while (n < 400 && gs.projectiles.length <= 1) { gs.update(DT); n += 1; }
+    expect(gs.projectiles.length).toBe(E.mirv_contact.nproj);
+    expect(gs.projectiles.map((p) => !!p.contact)).toEqual(E.mirv_contact.contacts);
+  });
+
+  it("_resolve_off_field: floor / WRAP side+ceil / tracer-lose / digger fizzle-vs-explode (1464-1497)", () => {
+    expect(offf(0, 1, 300.0, 480.0, 300, 479)).toEqual(E.offfield_floor);
+    expect(offf(5, 1, -3.0, 200.0, 0, 200)).toEqual(E.offfield_wrap);
+    expect(offf(5, 1, 200.0, -3.0, 200, 0)).toEqual(E.offfield_wrap_ceil);
+    expect(offf(0, 10, 300.0, 480.0, 300, 479)).toEqual(E.offfield_tracer);
+    expect(offf(0, 20, 300.0, 480.0, 300, 479)).toEqual(E.offfield_digger);
+    expect(offf(0, 20, 300.0, 480.0, 300, 479, 0)).toEqual(E.offfield_digger_zero);
+  });
+
+  it("_mag_deflect skips on vx==0 and on |dx|>15 (1557-1562)", () => {
+    function magskip(dx: number, vx: number): MagSkip {
+      const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, P2);
+      gs.new_game();
+      const sh = gs.tanks[0];
+      const tg = gs.tanks[1];
+      tg.x = 300; tg.y = 240;
+      tg.shield_hp = 150;
+      tg.shield_item = weapons.SLOT_MAG_DEFLECTOR;
+      tg.shield_push = true;
+      tg.shield_deflect = false;
+      const p = physics.launch(sh, gs.cfg as unknown as physics.PhysicsCfg, weapons.ITEMS[weapons.SLOT_BABY_MISSILE]);
+      p.owner = sh;
+      p.px = tg.x + dx; p.py = tg.y - 40;
+      p.sx = tg.x + dx; p.sy = tg.y - 40;
+      p.vx = vx; p.vy = -0.5;
+      const before = p.vy;
+      gs._mag_deflect(p);
+      return { vy_before: before, vy_after: p.vy };
+    }
+    const a = magskip(-8, 0.0);
+    expect(a.vy_before).toBeCloseTo(E.mag_vx0.vy_before, 12);
+    expect(a.vy_after).toBeCloseTo(E.mag_vx0.vy_after, 12);
+    const b = magskip(-40, 1.0);
+    expect(b.vy_before).toBeCloseTo(E.mag_farx.vy_before, 12);
+    expect(b.vy_after).toBeCloseTo(E.mag_farx.vy_after, 12);
+  });
+
+  it("digger fizzles on a shielded tank, no chip (1675)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, P2);
+    gs.new_game();
+    const tg = gs.tanks[1];
+    tg.shield_hp = 100;
+    tg.shield_item = weapons.SLOT_SHIELD;
+    const p = physics.launch(gs.tanks[0], gs.cfg as unknown as physics.PhysicsCfg, weapons.ITEMS[20]);
+    p.owner = gs.tanks[0];
+    const hp0 = tg.shield_hp;
+    gs._resolve_hit(p, { 0: "tank", 1: tg, 2: tg.x, 3: tg.y });
+    expect(p.active).toBe(E.digger_on_shield.active);
+    expect(hp0).toBe(E.digger_on_shield.shield_before);
+    expect(tg.shield_hp).toBe(E.digger_on_shield.shield_after);
+  });
+
+  it("contact-trigger sandhog detonates at the surface (1740-1744)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, P2);
+    gs.new_game();
+    const p = physics.launch(gs.tanks[0], gs.cfg as unknown as physics.PhysicsCfg, weapons.ITEMS[23]);
+    p.owner = gs.tanks[0];
+    p.contact = true;
+    const x = gs.tanks[0].x;
+    const y = gs.terrain.column_top(x) + 1;
+    gs._resolve_hit(p, { 0: "terrain", 1: null, 2: x, 3: y });
+    expect(p.active).toBe(E.contact_sandhog.active);
+    expect(gs.last_landing).toEqual(E.contact_sandhog.last_landing);
+  });
+
+  it("settle: a chute deploy that exhausts the last chute goes passive (1860-1861)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, FALLING_TANKS: "ON" }), 3, P2);
+    gs.new_game();
+    const t0 = gs.tanks[0];
+    t0.parachute_deployed = true;
+    t0.parachute_threshold = 0;
+    t0.inventory[weapons.SLOT_PARACHUTE] = 1;
+    gs.terrain.carve_circle(t0.x, t0.y + 30, 60);
+    gs._settle_tank(t0);
+    expect(t0.inventory[weapons.SLOT_PARACHUTE]).toBe(E.settle_no_chute.parachutes);
+    expect(!!t0.parachute_deployed).toBe(E.settle_no_chute.deployed);
+    expect(t0.y).toBe(E.settle_no_chute.y);
+  });
+
+  it("_tick_lightning_band is a no-op while every flash is still staggered (2231-2232)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0]]);
+    gs.new_game();
+    const lo = palette.LIGHTNING_BAND_LO;
+    const hi = palette.LIGHTNING_BAND_HI;
+    const slice = (): number[][] => {
+      const out: number[][] = [];
+      for (let i = lo; i <= hi; i++) {
+        const r = gs.lut.table[i];
+        out.push([r[0], r[1], r[2]]);
+      }
+      return out;
+    };
+    const bandBefore = slice();
+    gs.add_flash(5, 10, [255, 255, 235], 4); // stagger delay 4 -> frame -4 (<0)
+    gs._tick_lightning_band(); // level stays 0 -> early return, band untouched
+    const bandAfter = slice();
+    expect(gs.flashes[0].frame as number).toBe(E.lightning_zero.frame);
+    expect(bandAfter, "TS band unchanged by the no-op").toEqual(bandBefore);
+    expect(bandBefore, "band matches oracle before").toEqual(E.lightning_zero.band_before);
+    expect(bandAfter, "band matches oracle after").toEqual(E.lightning_zero.band_after);
+  });
+});
+
+// ===========================================================================
 // Scenario U: test-only edge guards (no oracle needed -- defensive/headless).
 // ===========================================================================
 describe("game_flow: edge guards", () => {
@@ -1325,5 +1643,113 @@ describe("game_flow: edge guards", () => {
     expect(gs._sim_human_keydown(-1), "keydown inert").toBe(false);
     expect(human.angle, "angle unchanged").toBe(angleBefore);
     expect(human.power, "power unchanged").toBe(powerBefore);
+  });
+
+  it("SIMULTANEOUS held controls drive the local human with a populated keymap (1329-1345)", () => {
+    // The headless port builds an EMPTY keymap (no pygame.key.key_code); the
+    // browser/render wiring fills it.  Inject a populated keymap so the held-control
+    // branches run.  TS-only (the oracle's headless keymap is empty -- not
+    // differential).  HOLD_DT is >1deg/step so the int() truncation shows movement.
+    const HOLD_DT = 0.1;
+    const cfg = makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS" });
+    const gs = build(cfg, 1, [["H", C.AI_HUMAN, 0, 0], ["AI", C.AI_SHOOTER, 0, 0]]);
+    gs.new_game();
+    gs.update(DT); // phase SIM_LIVE; _sim_human = the human tank
+    const human = gs.tanks[0];
+    gs._sim_keymap = { cw: 0, ccw: 1, power_up: 2, power_down: 3, fire: 4, weapon: 5 };
+    human.angle = 90; human.power = 500;
+    gs._sim_human_input([true, false, false, false], HOLD_DT);
+    expect(human.angle, "cw lowers angle (toward East)").toBeLessThan(90);
+    human.angle = 90;
+    gs._sim_human_input([false, true, false, false], HOLD_DT);
+    expect(human.angle, "ccw raises angle").toBeGreaterThan(90);
+    human.power = 500;
+    gs._sim_human_input([false, false, true, false], HOLD_DT);
+    expect(human.power, "power_up raises power").toBeGreaterThan(500);
+    human.power = 500;
+    gs._sim_human_input([false, false, false, true], HOLD_DT);
+    expect(human.power, "power_down lowers power").toBeLessThan(500);
+  });
+
+  it("SIMULTANEOUS keydown fire + weapon dispatch with a populated keymap (1363-1370)", () => {
+    const cfg = makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS" });
+    const gs = build(cfg, 1, [["H", C.AI_HUMAN, 0, 0], ["AI", C.AI_SHOOTER, 0, 0]]);
+    gs.new_game();
+    gs.update(DT);
+    gs._sim_keymap = { cw: 0, ccw: 1, power_up: 2, power_down: 3, fire: 4, weapon: 5 };
+    const human = gs.tanks[0];
+    human.angle = 60; human.power = 400; human.selected_weapon = weapons.SLOT_BABY_MISSILE;
+    const before = gs.projectiles.filter((p) => p.owner === human).length;
+    expect(gs._sim_human_keydown(4), "fire dispatched").toBe(true);
+    expect(gs.projectiles.filter((p) => p.owner === human).length, "human shell launched").toBeGreaterThan(before);
+    // weapon key is swallowed (returns true); the headless port stubs cycle_weapon.
+    expect(gs._sim_human_keydown(5), "weapon swallowed").toBe(true);
+    expect(gs._sim_human_keydown(99), "unmapped key not swallowed").toBe(false);
+  });
+
+  it("fire() parks an attack-taunt bubble when the talk pool is populated (859-863)", () => {
+    // The headless default talk pools are empty (oracle keeps TALKING_TANKS OFF);
+    // inject ALL + probability 100 + a 1-line pool to force a deterministic taunt
+    // -> set_speech.  TS-only stub (not differential).
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0], ["B", C.AI_HUMAN, 0, 0]]);
+    gs.new_game();
+    gs.update(DT);
+    const sh = gs.current_shooter!;
+    sh.angle = 70; sh.power = 300;
+    gs.talk = new TalkConfig(["ZAP!"], ["URK!"], {
+      TALKING_TANKS: "ALL", TALK_PROBABILITY: 100, TALK_DELAY: 50,
+      ATTACK_COMMENTS: "", DIE_COMMENTS: "",
+    });
+    gs.speech = null;
+    gs.fire();
+    expect(gs.speech, "attack taunt parked").not.toBeNull();
+    expect((gs.speech as unknown as { text: string }).text).toBe("ZAP!");
+  });
+
+  it("on_tank_destroyed parks a die-taunt bubble when the talk pool is populated (2358-2362)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0], ["B", C.AI_HUMAN, 0, 0]]);
+    gs.new_game();
+    gs.talk = new TalkConfig(["ZAP!"], ["URK!"], {
+      TALKING_TANKS: "ALL", TALK_PROBABILITY: 100, TALK_DELAY: 50,
+      ATTACK_COMMENTS: "", DIE_COMMENTS: "",
+    });
+    gs.speech = null;
+    gs.on_tank_destroyed(gs.tanks[1], null);
+    expect(gs.speech, "die taunt parked").not.toBeNull();
+    expect((gs.speech as unknown as { text: string }).text).toBe("URK!");
+  });
+
+  it("_leapfrog_hop is a no-op when the projectile has no owner (1762-1763)", () => {
+    // A fired leapfrog always carries its owner; this TS-only defensive guard (the
+    // Python oracle would AttributeError here, so it is not differential) returns
+    // before dereferencing a null owner.
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0], ["B", C.AI_HUMAN, 0, 0]]);
+    gs.new_game();
+    const p = physics.launch(gs.tanks[0], gs.cfg as unknown as physics.PhysicsCfg, weapons.ITEMS[4]);
+    p.owner = null;
+    p.warheads_left = 3;
+    const before = gs.projectiles.length;
+    expect(() => gs._leapfrog_hop(p, 100, 100)).not.toThrow();
+    expect(gs.projectiles.length, "no hop spawned for an owner-less proj").toBe(before);
+  });
+
+  it("_start_chute_descent ignores a trivial path (<2 points) (1875-1876)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0]]);
+    gs.new_game();
+    const t = gs.tanks[0] as unknown as { chute_descent?: unknown; x: number; y: number };
+    t.chute_descent = null;
+    gs._start_chute_descent(gs.tanks[0], [[t.x, t.y]]); // length 1 -> early return
+    expect(t.chute_descent, "no descent for a 1-point path").toBeFalsy();
+    gs._start_chute_descent(gs.tanks[0], []); // empty -> early return
+    expect(t.chute_descent, "no descent for an empty path").toBeFalsy();
+  });
+
+  it("retreat() returns false for a null or dead tank (793-794)", () => {
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0], ["B", C.AI_HUMAN, 0, 0]]);
+    gs.new_game();
+    gs.tanks[1].alive = false;
+    expect(gs.retreat(gs.tanks[1]), "a dead tank cannot retreat").toBe(false);
+    gs.current_shooter = null;
+    expect(gs.retreat(), "no current shooter -> false").toBe(false);
   });
 });

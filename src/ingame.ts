@@ -715,7 +715,14 @@ export function set_target(state: GameState, tank: Tank | null, pos: pygame.Poin
  *  Returns 'target_set' (RIGHT found a tank, or LEFT stored a point) or null
  *  (RIGHT with no tank in range -> the original beeps and waits). */
 function _handle_target_click(state: GameState, e: IngameEvent): string | null {
+  // Defensive event guard, kept for fidelity to the oracle (scorch/ingame.py
+  // _handle_target_click has the identical `if e.type != MOUSEBUTTONDOWN or e.button
+  // not in (1,3): return None`).  Its BODY is UNREACHABLE: _handle_target_click is
+  // module-private and its only caller, handle_game_event (ingame.ts:421,430), is
+  // itself inside `if MOUSEBUTTONDOWN and button in {1,3}`, so both disjuncts here are
+  // always false.  No test can reach the body without changing the export surface.
   if (e.type !== pygame.MOUSEBUTTONDOWN || (e.button !== 1 && e.button !== 3)) {
+    /* v8 ignore next 2 -- unreachable guard body (sole dispatcher pre-filters type+button) */
     return null;
   }
   const pos = e.pos as pygame.Point;
@@ -826,11 +833,19 @@ export function _handle_status_click(state: GameState, key: string): string | nu
  *
  *  DOM: calls hud_hitboxes (font), so it is browser-only; node gate skips it. */
 function _handle_hud_click(state: GameState, e: IngameEvent): string | null {
+  // Both early-return guard BODIES below are UNREACHABLE via the only caller,
+  // handle_game_event (ingame.ts:433): that call sits inside `if MOUSEBUTTONDOWN and
+  // button in {1,3}` (ingame.ts:421), and handle_game_event already returned at
+  // ingame.ts:414 when current_shooter is null -- so here the event always matches
+  // and `t` is never null.  Kept verbatim for fidelity to scorch/ingame.py
+  // _handle_hud_click, which carries the identical two guards.
   if (e.type !== pygame.MOUSEBUTTONDOWN || (e.button !== 1 && e.button !== 3)) {
+    /* v8 ignore next 2 -- unreachable: caller pre-filters type+button (ingame.ts:421) */
     return null;
   }
   const t = state.current_shooter;
   if (t === null) {
+    /* v8 ignore next 2 -- unreachable: caller returns at ingame.ts:414 when shooter is null */
     return null;
   }
   const boxes = hud_hitboxes(state);

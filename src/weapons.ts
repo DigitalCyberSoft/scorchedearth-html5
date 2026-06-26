@@ -167,6 +167,7 @@ export const ITEMS: Item[] = [
 ];
 
 export const NUM_ITEMS = ITEMS.length;   // 48 (DAT_5f38_1bb6)
+/* v8 ignore next 4 -- unreachable load-time invariant: ITEMS is a fixed literal of 48 entries, so NUM_ITEMS === 48 always and the guard never fires. Mirrors weapons.py's `assert NUM_ITEMS == 48`; kept as a tripwire if the table is ever edited. */
 if (NUM_ITEMS !== 48) {
   // Mirrors `assert NUM_ITEMS == 48` in weapons.py:118.
   throw new Error(`NUM_ITEMS must be 48, got ${NUM_ITEMS}`);

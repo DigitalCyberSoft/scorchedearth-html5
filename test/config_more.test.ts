@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { fieldToCfgToken, pyStr } from "../src/config";
+import { fieldToCfgToken, pyStr, pyFloatRepr } from "../src/config";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VECTORS = join(__dirname, "..", "oracle", "vectors", "config_more.json");
@@ -54,6 +54,26 @@ describe("config(more): pyStr infers int/float/str like CPython str", () => {
     it(`pyStr(${JSON.stringify(c.enc)}) [${c.kind}] -> ${JSON.stringify(c.str)}`, () => {
       const v = c.kind === "str" ? (c.enc as string) : dec(c.enc);
       expect(pyStr(v)).toBe(c.str);
+    });
+  }
+  it("pyStr(boolean) falls through to String(v) (non-number, non-string leaf)", () => {
+    // ConfigValue admits boolean; the bare String(v) tail is the only branch that
+    // renders it. Python str(True/False) -> "True"/"False"; JS String -> "true"/
+    // "false". This pins the JS leaf (the port never feeds a bool here in practice,
+    // but the tail must not throw or mis-route to the number/string arms).
+    expect(pyStr(true as unknown as number)).toBe("true");
+    expect(pyStr(false as unknown as number)).toBe("false");
+  });
+});
+
+describe("config(more): pyFloatRepr == CPython str(float), called DIRECTLY", () => {
+  // Drive the exported repr over the SAME oracle floats fieldToCfgToken uses, but
+  // through the direct entry point -- exercises the positional, scientific
+  // (e < -4 or e >= 16), inf/-inf/nan, and signed-zero branches of pyFloatRepr in
+  // one place. Golden strings are CPython str(value) from oracle/dump_more.py.
+  for (const c of vec.float_cases) {
+    it(`pyFloatRepr(${JSON.stringify(c.enc)}) -> ${JSON.stringify(c.str)}`, () => {
+      expect(pyFloatRepr(dec(c.enc))).toBe(c.str);
     });
   }
 });

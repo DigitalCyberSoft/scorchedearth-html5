@@ -179,6 +179,7 @@ export class Rng {
       acc += weights[i];
       if (t <= acc) return i;
     }
+    /* v8 ignore next 1 -- unreachable tail: total>0 here and `acc` sums `weights` in the SAME order as `total`, so acc == total on the final i; t = uniform(0,total) < total <= acc forces an in-loop return. Kept as the type-required fallthrough. */
     return weights.length - 1;
   }
 }

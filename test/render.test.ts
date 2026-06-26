@@ -241,6 +241,35 @@ describe("render: compositeTerrainRgb vs REAL _composite_terrain (array3d readba
   }
 });
 
+// gridAt() accepts the flat-TypedArray form (asserted above) AND a NESTED number[][]
+// (grid[x][y]) the port hands it from a non-typed grid (render.ts:497-509).  Feeding
+// the SAME golden grid as a nested array MUST yield the byte-identical composite the
+// flat path (already oracle-verified vs the REAL _composite_terrain) produced -- this
+// drives the nested-array branch (render.ts:507-509) with that exactness as the check.
+describe("render: compositeTerrainRgb nested number[][] grid == flat (gridAt[x][y]) EXACT", () => {
+  for (let i = 0; i < vec.composite.length; i++) {
+    const c = vec.composite[i];
+    it(`${c.label} ${c.w}x${c.h} nested grid matches the flat composite`, () => {
+      // nested[x][y] = grid_flat[x*h + y] (the column-major raveling the dumper used).
+      const nested: number[][] = [];
+      for (let x = 0; x < c.w; x++) {
+        const col: number[] = [];
+        for (let y = 0; y < c.h; y++) col.push(c.grid_flat[x * c.h + y]);
+        nested.push(col);
+      }
+      const lut = new LiveLUT();
+      let skyPlane: { idx: Int32Array } | { rgb: Uint8Array };
+      if (c.sky_idx_set) {
+        skyPlane = { idx: render.gradientIndexPlane(c.w, c.h) };
+      } else {
+        skyPlane = { rgb: render.makeSkyPlane("SUNSET", c.w, c.h).data };
+      }
+      const rgb = render.compositeTerrainRgb(nested, c.w, c.h, lut, skyPlane);
+      expectArrayExact(rgb, c.rgb_flat, `nested composite ${c.label}`);
+    });
+  }
+});
+
 describe("render: explosionRingIndex (0xDD - r*20/maxR clamped) EXACT", () => {
   it(`${vec.explosion_ring_index.length} (r, maxr) samples match`, () => {
     for (const c of vec.explosion_ring_index) {

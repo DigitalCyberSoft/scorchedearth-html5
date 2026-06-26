@@ -319,6 +319,19 @@ describe("ai: _simulate_landing (real integrator)", () => {
   }
 });
 
+describe("ai: _simulate_landing loop-exhaust (zero-g bouncing shot -> null)", () => {
+  const r = vec.simulate_landing_exhaust;
+  it(`g=${r.gravity} ${r.elastic} ang=${r.angle} never lands -> null`, () => {
+    // The off-world early-out (handle_walls false) is the OTHER null path; bouncy
+    // walls keep the shell in-world, so this exercises the flight-horizon tail.
+    const cfg = mkCfg(r.gravity, 0, 0, r.elastic);
+    const st = { cfg, w: 1024, h: 768 };
+    const tank = mkTank(0, 200, 600);
+    const lx = ai._simulate_landing(st, tank, r.angle, r.power, r.ty);
+    expect(lx).toBe(r.land_x === null ? null : r.land_x);
+  });
+});
+
 describe("ai: _wind_seed_angle (Spoiler/Cyborg seed)", () => {
   for (const r of vec.wind_seed_angle) {
     it(`wind=${r.wind} visc=${r.visc} right=${r.right}`, () => {
@@ -460,6 +473,97 @@ describe("ai: take_turn (dispatch + Unknown re-roll)", () => {
         expect(me.reveal_type).toBe(r.reveal_type_after);
       });
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Branch battery: the per-turn GUARD / fall-through paths the geo sweep misses
+// (no-enemy holds, Tosser bracket arms, Poolshark wall-tune give-up / angle-90
+// drop / 8-try exhaust, Chooser blocked-line routing, Shooter sub-1 power break).
+// Each row carries its full MockState spec; outputs are integers -> EXACT.
+// ---------------------------------------------------------------------------
+describe("ai: turn_branch (per-turn guard / fall-through paths)", () => {
+  for (const r of vec.turn_branch) {
+    it(`${r.label}`, () => {
+      const cfg = mkCfg(0.2, 0, 0, r.elastic);
+      const roster: Tank[] = [];
+      for (const entry of r.roster as [number, number, number, boolean][]) {
+        const [pi, x, y, alive] = entry;
+        const t = mkTank(pi, x, y, pi === 0 ? r.ai_class : 0);
+        t.alive = alive;
+        roster.push(t);
+      }
+      const t0 = roster[0];
+      const ov = (r.tank0 ?? {}) as {
+        angle?: number;
+        power?: number;
+        ai_tries?: number;
+        health?: number;
+      };
+      if (ov.angle !== undefined) t0.angle = ov.angle;
+      if (ov.power !== undefined) t0.power = ov.power;
+      if (ov.ai_tries !== undefined) t0.ai_tries = ov.ai_tries;
+      if (ov.health !== undefined) t0.health = ov.health;
+      const terrain = new MockTerrain(
+        r.dirt_rect ? (r.dirt_rect as [number, number, number]) : null,
+      );
+      const st = new MockState(cfg, roster, {
+        seed: r.seed,
+        last_landing: r.last_landing
+          ? (r.last_landing as [number, number])
+          : null,
+        live_sky: r.live_sky ?? "",
+        terrain,
+      });
+      st.rng.seed(r.seed);
+      const [ang, pw, wp] = ai.take_turn(st, t0);
+      expect(ang, `${r.label} angle`).toBe(r.angle);
+      expect(pw, `${r.label} power`).toBe(r.power);
+      expect(wp, `${r.label} weapon`).toBe(r.weapon);
+      expect(t0.angle, `${r.label} tank_angle_after`).toBe(r.tank_angle_after);
+      expect(t0.ai_tries, `${r.label} tank_ai_tries_after`).toBe(
+        r.tank_ai_tries_after,
+      );
+    });
+  }
+});
+
+describe("ai: _score_nearest_enemy (null-exclude wrapper, port fidelity)", () => {
+  for (const r of vec.score_wrapper) {
+    it(`team=${r.team} -> pi ${r.target_pi}`, () => {
+      const a = mkTank(0, 500, 400, C.AI_SHOOTER, 1);
+      let roster: Tank[];
+      if (r.team === "alone") {
+        roster = [a];
+      } else {
+        roster = [
+          a,
+          mkTank(1, 300, 400, 0, 1),
+          mkTank(2, 700, 400, 0, 2),
+          mkTank(3, 520, 400, 0, 2),
+        ];
+      }
+      const team = r.team === "alone" ? "NONE" : r.team;
+      const st = new MockState(mkCfg(0.2, 0, 0, "NONE", team), roster);
+      const tgt = ai._score_nearest_enemy(st, a);
+      expect(tgt === null ? -1 : tgt.player_index).toBe(r.target_pi);
+    });
+  }
+});
+
+describe("ai: elastic fallback (predicates on a cfg without live_elastic)", () => {
+  // _wall_flatten_active / _poolshark_bouncy_walls read live_elastic, then fall
+  // back to .elastic, then 0. The real Config always derives live_elastic, so the
+  // fallback only runs for a cfg shaped with .elastic alone (or neither attr).
+  for (const r of vec.elastic_fallback) {
+    it(`${r.shape} elastic=${r.elastic}`, () => {
+      const cfg = r.shape === "neither" ? {} : { elastic: r.elastic };
+      const st = { cfg } as unknown as ai.AIState;
+      expect(ai._wall_flatten_active(st), `${r.shape} wall_flatten`).toBe(
+        r.wall_flatten,
+      );
+      expect(ai._poolshark_bouncy_walls(st), `${r.shape} bouncy`).toBe(r.bouncy);
+    });
   }
 });
 

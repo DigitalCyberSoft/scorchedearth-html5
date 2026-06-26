@@ -89,6 +89,7 @@ function trunc(x: number): number {
 function linspace(start: number, stop: number, num: number): Float64Array {
   const out = new Float64Array(num);
   if (num <= 0) return out;
+  /* v8 ignore next 4 -- unreachable: the sole caller (_from_mtn L358) passes num=this.w only on the narrow-MTN scale-up branch (mw<this.w), which requires this.w>=2; mw>=1>=this.w otherwise takes the slice branch, so num is never 1. */
   if (num === 1) {
     out[0] = start;
     return out;
@@ -133,6 +134,7 @@ function interp(x: Float64Array, xp: number[] | Float64Array, fp: number[] | Flo
     }
     let j = lo - 1;
     if (j < 0) j = 0;
+    /* v8 ignore next 4 -- unreachable: xv>=xpLast returns at L122, so values reaching here have xv<xpLast => the right-bisect gives lo<=n-1 => j=lo-1<=n-2; j>=n-1 cannot occur. */
     if (j >= n - 1) {
       out[i] = fpLast;
       continue;
@@ -408,6 +410,7 @@ export class Terrain {
     for (let x = 0; x < this.w; x++) {
       const top = Math.max(0, Math.min(h - 1, pyRoundToEven(heights[x])));
       const n = h - top;
+      /* v8 ignore next 3 -- unreachable: top is clamped to [0, h-1] above, so n = h - top >= 1 always; n <= 0 cannot occur (h >= 1 for any constructed terrain). */
       if (n <= 0) {
         continue;
       }
@@ -674,6 +677,7 @@ export class Terrain {
         land += 1;
       }
       const drop = land - run_bottom; // rows of empty gap to fall through
+      /* v8 ignore next 3 -- unreachable: L665 guarantees run_bottom<h and the inner-while exit guarantees run_bottom is non-dirt, so the L672 descent advances land by >=1 before the next dirt; drop = land-run_bottom >= 1 always. */
       if (drop <= 0) {
         return; // no gap (defensive): not suspended
       }

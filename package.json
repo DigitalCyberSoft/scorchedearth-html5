@@ -10,11 +10,15 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "coverage:node": "vitest run --coverage",
+    "coverage:merge": "node scripts/coverage_merge.mjs",
+    "coverage:all": "bash scripts/coverage_all.sh"
   },
   "devDependencies": {
     "@types/node": "^22.8.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "monocart-coverage-reports": "^2.12.12",
     "playwright": "^1.61.1",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",

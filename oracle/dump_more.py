@@ -144,6 +144,20 @@ def dump_guidance():
          "owner": {"x": 200, "y": 600},
          "g": {"type": "lazyboy", "point": None,
                "target": {"x": 360, "y": 430}}},
+        # Heat: renorm-guard (nsp<1e-6). The shell creeps at ~2e-6 px/step DIRECTLY
+        # AWAY from a target 10px to its left, so the 0.35 blend lands almost on the
+        # antiparallel cancellation (|1-2*0.35|=0.30 of sp ~= 6e-7 < 1e-6) and the
+        # post-blend renormalize bails, leaving v untouched (guidance.py heat nsp guard).
+        {"label": "heat_nsp_guard", "p0": [300, 400], "v0": [2e-6, 0.0],
+         "owner": {"x": 300, "y": 600, "team_id": 0},
+         "g": {"type": "heat",
+               "tanks_specs": [{"x": 290, "y": 404, "team_id": 0, "alive": True}]}},
+        # Lazy Boy: renorm-guard (nsp<1e-6). Same antiparallel creep toward a point
+        # 10px left; the tighter 0.6 blend (|1-2*0.6|=0.20 of sp ~= 4e-7) still
+        # cancels below 1e-6, so the renormalize bails (guidance.py lazyboy nsp guard).
+        {"label": "lazyboy_nsp_guard", "p0": [300, 400], "v0": [2e-6, 0.0],
+         "owner": {"x": 200, "y": 600},
+         "g": {"type": "lazyboy", "point": [290, 400]}},
     ]
 
     out = []
@@ -475,6 +489,81 @@ def dump_ai():
     _write("ai", {"solve_power": out})
 
 
+# ---------------------------------------------------------------------------
+# savegame: the SCIENTIFIC-notation branch of pyFloatRepr (e < -4 or e >= 16),
+# which the main save battery's small-magnitude floats never reach. The Python
+# reference for a float leaf is json.dumps(v) (savegame.py serializes the body
+# with json.dumps); the TS pyFloatRepr must reproduce that byte-for-byte. The
+# throw guards (encodeInt non-finite, b64 invalid, bad-JSON body, grid length
+# mismatch, roster mismatch) are TS-internal contracts asserted directly in the
+# test (no Python equivalent to diff: Python b64decode is lenient, json allows
+# nan/inf -- the port deliberately rejects, DTM 6.x), so only the repr is dumped.
+# ---------------------------------------------------------------------------
+def dump_savegame():
+    # finite scientific doubles: e >= 16 and e <= -5, positive and negative, with
+    # and without a fractional mantissa, plus the e==15/e==16 positional/sci edge.
+    vals = [1e16, 1e20, 1.5e16, 1.234e18, 9.999e21, 1e21,
+            1e-5, 1e-7, 2.5e-8, 1.25e-9, -3e-9, -1e16, -1.5e16,
+            1e15, 1234567890123456.0]
+    float_sci = [{"enc": _enc(v), "str": json.dumps(v)} for v in vals]
+    for c in float_sci:
+        print(f"    savegame repr {c['enc']}: {c['str']}")
+    _write("savegame", {"float_sci": float_sci})
+
+
+# ---------------------------------------------------------------------------
+# terrain: the FLAT-slice plateau branch of Terrain._from_mtn (hi-lo<1e-6),
+# unreachable by the 10 shipped (mountainous) .MTN files. A synthetic MTN whose
+# columns are all identical decodes to a constant surface, so the per-slice
+# normalize collapses to top + 0.6*(floor-top). Differential: TS _from_mtn must
+# reproduce Python's heights for the same bytes + rng seed.
+# ---------------------------------------------------------------------------
+def _build_flat_mtn(mw, height, col):
+    import struct
+    hdr = b"MT\xbe\xef" + struct.pack(">H", 1) + struct.pack(
+        "<9H", mw, 0, height, 16, 0, 0, 0, 0, 0)
+    pal = bytes([255, 255, 255]) * 16
+    body = b""
+    for _ in range(mw):
+        cnt = len(col)
+        body += struct.pack("<H", cnt)
+        bb = bytearray((cnt + 1) // 2)
+        for i, idx in enumerate(col):
+            if i % 2 == 0:
+                bb[i // 2] |= idx & 0xF
+            else:
+                bb[i // 2] |= (idx & 0xF) << 4
+        body += bytes(bb)
+    return hdr + pal + body
+
+
+def dump_terrain():
+    import tempfile
+    from scorch import terrain as T
+    from scorch import rng as R
+
+    cases = []
+    # (mtn_width, mtn_height, column, terrain_w, terrain_h, seed). mw<terrain_w
+    # forces the interp scale-up branch; mw>=terrain_w forces the slice branch.
+    SPECS = [
+        ("flat_interp", 8, 40, [1, 2, 3, 4, 5], 16, 40, 7),   # narrow MTN -> scale up
+        ("flat_slice", 20, 60, [2, 3, 4], 12, 60, 3),         # wide MTN -> slice
+    ]
+    for label, mw, mh, col, w, h, seed in SPECS:
+        data = _build_flat_mtn(mw, mh, col)
+        with tempfile.NamedTemporaryFile(suffix=".mtn", delete=False) as f:
+            f.write(data)
+            path = f.name
+        t = T.Terrain(w, h)
+        heights = t._from_mtn(path, R.Rng(seed))
+        os.unlink(path)
+        flat = len(set(round(x, 9) for x in heights)) == 1
+        cases.append({"label": label, "hex": data.hex(), "w": w, "h": h,
+                      "seed": seed, "heights": list(heights), "flat": flat})
+        print(f"    terrain {label}: flat={flat} h0={heights[0]:.4f}")
+    _write("terrain", {"from_mtn_flat": cases})
+
+
 def main():
     print(f"Oracle (more): port = {_SCORCH_PY}")
     dump_guidance()
@@ -486,6 +575,8 @@ def main():
     dump_weapons()
     dump_mtn()
     dump_ai()
+    dump_savegame()
+    dump_terrain()
     print("Done.")
 
 

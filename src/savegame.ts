@@ -154,11 +154,12 @@ export function pyFloatRepr(n: number): string {
 
   // toExponential() with no arg yields the minimal digits that round-trip in V8.
   const exp = a.toExponential(); // e.g. "5e-2", "2e-1", "2e+1", "1.23456789e+5"
-  const m = exp.match(/^(\d)(?:\.(\d+))?e([+\-]\d+)$/);
-  if (!m) {
-    // Defensive fallback: should not happen for finite nonzero doubles.
-    return (neg ? "-" : "") + a.toString();
-  }
+  // m always matches: the guards above returned for NaN/+-Infinity/0, so only a
+  // finite nonzero double reaches here, and Number#toExponential() on such a value
+  // always yields "d[.ddd]e(+/-)NN" which this regex captures. A null m would be a
+  // port bug; the non-null assertion throws loudly on deref rather than masking it
+  // behind a JS-spelled a.toString() that does NOT match CPython repr (DTM 6.8).
+  const m = exp.match(/^(\d)(?:\.(\d+))?e([+\-]\d+)$/)!;
   const lead = m[1];
   const frac = m[2] || "";
   const digits = lead + frac; // all significant digits, no point

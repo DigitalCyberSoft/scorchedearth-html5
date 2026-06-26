@@ -673,6 +673,18 @@ def dump_ai():
                         "land_x": (None if lx is None else lx),
                     })
 
+    # loop-exhaust: a zero-gravity HORIZONTAL shot under bouncy walls never
+    # descends through ty nor reaches the floor -- it bounces left/right forever,
+    # so the integrator runs out its flight horizon and returns None via the
+    # loop-exhaust tail (NOT the off-world early-out).
+    cfg_ex = _mk_cfg(gravity=0.0, elastic="RUBBER")
+    st_ex = MockState(cfg_ex, [], w=1024, h=768)
+    lx_ex = ai._simulate_landing(st_ex, _mk_tank(0, 200, 600), 0, 500, 300)
+    out["simulate_landing_exhaust"] = {
+        "gravity": 0.0, "elastic": "RUBBER", "angle": 0, "power": 500, "ty": 300,
+        "land_x": (None if lx_ex is None else lx_ex),
+    }
+
     # -- _wind_seed_angle: the Spoiler/Cyborg wind blend seed. -----------------
     for wind in (-200, -100, -40, 0, 40, 100, 200):
         for visc in (0, 5, 20):
@@ -886,6 +898,144 @@ def dump_ai():
                 "fn": "buy_moron", "seed": seed, "cash_in": cash,
                 "cash_out": me.cash, "inventory": list(me.inventory),
             })
+
+    # --- branch battery: the per-turn GUARD / fall-through paths the geo sweep
+    # never hits. Each scenario is FULLY specified (roster with alive flags, cfg
+    # params, optional terrain dirt rect / last_landing / live_sky / acting-tank
+    # overrides) so the TS test rebuilds the identical MockState and asserts the
+    # same turn output. Drives ai.take_turn (routes by ai_class). ------------------
+    out["turn_branch"] = []
+    # 9 near-vertical, far-overhead enemies: every shooter-refine walks its seed to
+    # 90 and recurses, so the Poolshark loop exhausts its 8 tries and falls through.
+    poolshark_exhaust_roster = [[0, 100, 700, True]] + [
+        [k, 100 + k, 50, True] for k in range(1, 10)]
+    BRANCH = [
+        # Tosser: prior landing but NO live enemy -> hold current aim.
+        {"label": "tosser_no_enemy", "ai_class": C.AI_TOSSER, "elastic": "NONE",
+         "roster": [[0, 200, 400, True]], "last_landing": [600, 380],
+         "tank0": {"angle": 60, "power": 480}},
+        # Tosser: shell fell FARTHER than the target -> power -= 10.
+        {"label": "tosser_fell_farther", "ai_class": C.AI_TOSSER, "elastic": "NONE",
+         "roster": [[0, 200, 400, True], [1, 250, 400, True]],
+         "last_landing": [600, 380], "tank0": {"angle": 60, "power": 480}},
+        # Tosser: short + HIGH (ly<target.y) on the steepen gate, angle>95 -> -=2.
+        {"label": "tosser_steepen_high_angle", "ai_class": C.AI_TOSSER,
+         "elastic": "NONE", "roster": [[0, 200, 400, True], [1, 800, 400, True]],
+         "last_landing": [790, 100], "tank0": {"angle": 100, "power": 480}},
+        # Tosser: short + LOW (ly>=target.y), not-farther -> power += 10.
+        {"label": "tosser_short_low", "ai_class": C.AI_TOSSER, "elastic": "NONE",
+         "roster": [[0, 200, 400, True], [1, 800, 400, True]],
+         "last_landing": [790, 500], "tank0": {"angle": 60, "power": 480}},
+        # Spoiler: no live enemy -> _spoiler_target None -> hold current aim.
+        {"label": "spoiler_no_enemy", "ai_class": C.AI_SPOILER, "elastic": "NONE",
+         "roster": [[0, 200, 400, True]], "tank0": {"angle": 70, "power": 510}},
+        # Cyborg: no live enemy -> cyborg_target None -> hold current aim.
+        {"label": "cyborg_no_enemy", "ai_class": C.AI_CYBORG, "elastic": "NONE",
+         "roster": [[0, 200, 400, True]], "tank0": {"angle": 70, "power": 510}},
+        # Chooser: line of fire BLOCKED by dirt + bouncy walls -> Poolshark.
+        {"label": "chooser_blocked_poolshark", "ai_class": C.AI_CHOOSER,
+         "elastic": "RUBBER", "roster": [[0, 200, 400, True], [1, 800, 400, True]],
+         "dirt_rect": [400, 390, 600], "tank0": {"angle": 45, "power": 500}},
+        # Chooser: line of fire BLOCKED by dirt + non-bouncy walls -> Spoiler.
+        {"label": "chooser_blocked_spoiler", "ai_class": C.AI_CHOOSER,
+         "elastic": "NONE", "roster": [[0, 200, 400, True], [1, 800, 400, True]],
+         "dirt_rect": [400, 390, 600], "tank0": {"angle": 45, "power": 500}},
+        # Poolshark: bouncy walls + landing, ai_tries already 4 -> give-up + reset.
+        {"label": "poolshark_walltune_giveup", "ai_class": C.AI_POOLSHARK,
+         "elastic": "RUBBER", "roster": [[0, 200, 400, True], [1, 800, 400, True]],
+         "last_landing": [600, 380],
+         "tank0": {"angle": 45, "power": 500, "ai_tries": 4}},
+        # Poolshark: bouncy walls + landing FAR, target NEAR, angle 89 -> +1 -> 90 drop.
+        {"label": "poolshark_walltune_angle90", "ai_class": C.AI_POOLSHARK,
+         "elastic": "RUBBER", "roster": [[0, 200, 400, True], [1, 250, 400, True]],
+         "last_landing": [900, 380],
+         "tank0": {"angle": 89, "power": 500, "ai_tries": 0}},
+        # Poolshark: 9 overhead enemies all recurse -> 8-try loop falls through.
+        {"label": "poolshark_exhaust", "ai_class": C.AI_POOLSHARK, "elastic": "NONE",
+         "roster": poolshark_exhaust_roster,
+         "tank0": {"angle": 45, "power": 500}},
+        # Shooter: enemy directly BELOW + 1px aside -> seed angle 1, oracle returns a
+        # sub-1 power (0<=r<1) -> the refine's neither-steer-nor-exit break.
+        {"label": "shooter_subunit_power", "ai_class": C.AI_SHOOTER, "elastic": "NONE",
+         "roster": [[0, 100, 100, True], [1, 101, 600, True]],
+         "tank0": {"angle": 45, "power": 500}},
+    ]
+    for s in BRANCH:
+        cfg = _mk_cfg(elastic=s.get("elastic", "NONE"))
+        roster = []
+        for entry in s["roster"]:
+            pi, x, y = entry[0], entry[1], entry[2]
+            alive = entry[3] if len(entry) > 3 else True
+            t = _mk_tank(pi, x, y, ai_class=(s["ai_class"] if pi == 0 else 0))
+            t.alive = alive
+            roster.append(t)
+        t0 = roster[0]
+        ov = s.get("tank0", {})
+        for k in ("angle", "power", "ai_tries", "health"):
+            if k in ov:
+                setattr(t0, k, ov[k])
+        dirt = s.get("dirt_rect")
+        terrain = MockTerrain(tuple(dirt) if dirt else None)
+        last = tuple(s["last_landing"]) if s.get("last_landing") else None
+        seed = s.get("seed", 7)
+        st = MockState(cfg, roster, seed=seed, last_landing=last,
+                       live_sky=s.get("live_sky", ""), terrain=terrain)
+        st.rng.seed(seed)
+        ang, pw, wp = ai.take_turn(st, t0)
+        out["turn_branch"].append({
+            "label": s["label"], "ai_class": s["ai_class"],
+            "elastic": s.get("elastic", "NONE"), "roster": s["roster"],
+            "tank0": ov, "last_landing": s.get("last_landing"),
+            "dirt_rect": s.get("dirt_rect"), "live_sky": s.get("live_sky", ""),
+            "seed": seed, "angle": ang, "power": pw, "weapon": wp,
+            "tank_angle_after": t0.angle, "tank_ai_tries_after": t0.ai_tries,
+        })
+
+    # --- _score_nearest_enemy: the null-exclude WRAPPER kept for port fidelity
+    # (the live dispatch only calls the _ex form). Nearest live, non-friendly enemy
+    # by |dx|. Differential: target player_index, EXACT. ---------------------------
+    out["score_wrapper"] = []
+    for team in ("NONE", "STANDARD"):
+        cfg = _mk_cfg(team=team)
+        a = _mk_tank(0, 500, 400, ai_class=C.AI_SHOOTER, team_id=1)
+        b = _mk_tank(1, 300, 400, team_id=1)   # friendly when teams on
+        c = _mk_tank(2, 700, 400, team_id=2)
+        d = _mk_tank(3, 520, 400, team_id=2)   # nearest by |dx|
+        st = MockState(cfg, [a, b, c, d])
+        tgt = ai._score_nearest_enemy(st, a)
+        out["score_wrapper"].append({
+            "team": team, "target_pi": (-1 if tgt is None else tgt.player_index)})
+    # no-enemy roster -> None (the best=None return of the shared core)
+    cfg = _mk_cfg()
+    a = _mk_tank(0, 500, 400, ai_class=C.AI_SHOOTER)
+    st = MockState(cfg, [a])
+    tgt = ai._score_nearest_enemy(st, a)
+    out["score_wrapper"].append({
+        "team": "alone", "target_pi": (-1 if tgt is None else tgt.player_index)})
+
+    # --- elastic fallback: _wall_flatten_active / _poolshark_bouncy_walls read
+    # getattr(cfg, "live_elastic", getattr(cfg, "elastic", 0)). The live game always
+    # derives live_elastic; the predicates fall back to .elastic (then 0) for a cfg
+    # that lacks it. Drive that fallback with a cfg exposing ONLY .elastic, and the
+    # neither-attr case (-> 0). Booleans, EXACT. -----------------------------------
+    class _CfgElasticOnly:
+        def __init__(self, elastic):
+            self.elastic = elastic
+
+    class _CfgNeither:
+        pass
+
+    fb = []
+    for el in (0, 1, 2, 3, 4, 5):
+        st = type("S", (), {"cfg": _CfgElasticOnly(el)})()
+        fb.append({"shape": "elastic_only", "elastic": el,
+                   "wall_flatten": ai._wall_flatten_active(st),
+                   "bouncy": ai._poolshark_bouncy_walls(st)})
+    stN = type("S", (), {"cfg": _CfgNeither()})()
+    fb.append({"shape": "neither", "elastic": None,
+               "wall_flatten": ai._wall_flatten_active(stN),
+               "bouncy": ai._poolshark_bouncy_walls(stN)})
+    out["elastic_fallback"] = fb
 
     return _write("ai", out)
 

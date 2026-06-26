@@ -153,6 +153,16 @@ async function main() {
 
   const coverage = await page.coverage.stopJSCoverage();
 
+  // Dump the RAW playwright V8 coverage (url + source + functions byte ranges) to
+  // disk so scripts/coverage_merge.mjs can map it back to src/*.ts via the inline
+  // vite sourcemaps and union it with the node + boot captures.  Each entry carries
+  // its served source, which holds the inline sourcemap MCR needs.  Path is
+  // overridable via COVER_V8_OUT; the per-module byte summary below is unchanged.
+  const v8OutPath = process.env.COVER_V8_OUT || join(HERE, "..", "coverage", "browser-render", "v8.json");
+  mkdirSync(dirname(v8OutPath), { recursive: true });
+  writeFileSync(v8OutPath, JSON.stringify(coverage));
+  console.log(`[cover] wrote raw V8 (${coverage.length} entries) -> ${v8OutPath}`);
+
   // per-module coverage summary.  V8 precise/block coverage is a RANGE TREE: the
   // outermost range is the whole-file module function (count>=1 once imported), so
   // unioning count>0 ranges would always report ~100%.  The honest figure is the

@@ -37,13 +37,24 @@ import {
   type GameState,
 } from "../src/game";
 import { Renderer, setSpritesProvider as setRenderSprites, setChooseTargetPredicate } from "../src/render";
-import { setSpritesProvider as setScreensSprites, setSaveStoreProvider, ShopScreen } from "../src/screens";
+import {
+  setSpritesProvider as setScreensSprites,
+  setSaveStoreProvider,
+  ShopScreen,
+  OptionsScreen,
+  RegistrationScreen,
+  SellScreen,
+  InventoryScreen,
+  TankInitScreen,
+  SaveScreen,
+} from "../src/screens";
 import * as ingame from "../src/ingame";
 import * as ui from "../src/ui";
 import * as talk from "../src/talk";
 import * as damage from "../src/damage";
 import * as sprites from "../src/sprites";
 import * as pygame from "../src/pygame";
+import * as widgets from "../src/widgets";
 
 const W = 1024;
 const H = 768;
@@ -125,6 +136,24 @@ function enemyOf(gs: GameState): GameState["tanks"][number] {
 
 interface StateMeta {
   [k: string]: unknown;
+}
+
+// Run every panel widget's setter through its REAL accelerator path (Selector /
+// Toggle / Spinner on_accel -> bound set_*) and type one printable char into any
+// TextField, so the screen-builder SET closures (screens.ts _enum_selector set_idx,
+// _toggle set_, _num_spinner set, the `text` and `display_*` bindings) execute --
+// drawing alone only runs their getters.  NO try/catch: a setter that throws is a
+// real bug runState must surface.
+function sweepSetters(panel: { widgets: unknown[] }): void {
+  for (const wAny of panel.widgets) {
+    const w = wAny as { on_accel?: () => unknown; on_text_key?: (e: unknown) => void };
+    if (typeof w.on_accel === "function") {
+      w.on_accel();
+    }
+    if (typeof w.on_text_key === "function") {
+      w.on_text_key({ type: pygame.KEYDOWN, key: 120, unicode: "x" }); // 'x' -> set()
+    }
+  }
 }
 
 // Each entry renders ONE visual state through the real path and returns metadata.
@@ -345,6 +374,251 @@ const STATES: { [name: string]: () => StateMeta } = {
     screen.draw(surf);
     blit(surf);
     return { phase: gs.phase, tank: tank.name };
+  },
+
+  // (i) pygame primitive conformance -- the DOM-backed Surface paths the per-module
+  //     node tests cannot reach (no canvas in vitest's node env) AND no game-render
+  //     state happens to hit: Surface.get_rect(opts), the CSS-string color parse
+  //     (normColor -> cssToRgba), the set_colorkey blit (_withColorkeyStripped), and
+  //     the surfarray.blit_array length guard.  These are REAL assertions (a throw is
+  //     captured by runState as ok:false -> non-zero exit), checked against pygame's
+  //     documented semantics, then a multi-band surface is painted so the blank gate
+  //     passes.  This is the sanctioned "add the state to test-browser" path for a
+  //     browser-only pygame branch.
+  pygame_primitives: () => {
+    const fail = (m: string): never => {
+      throw new Error(`pygame_primitives: ${m}`);
+    };
+
+    // -- Surface.get_rect(opts): a "virtual attribute" in opts MOVES the rect (keeps
+    //    its w,h), matching pygame (pygame.ts:375-382).
+    const s = new pygame.Surface([40, 30]);
+    const rt = s.get_rect({ topleft: [5, 7] });
+    if (rt.x !== 5 || rt.y !== 7 || rt.w !== 40 || rt.h !== 30) fail(`get_rect topleft ${rt.x},${rt.y},${rt.w}x${rt.h}`);
+    const rc = s.get_rect({ center: [100, 80] });
+    if (rc.centerx !== 100 || rc.centery !== 80 || rc.w !== 40 || rc.h !== 30) fail(`get_rect center ${rc.centerx},${rc.centery}`);
+
+    // -- CSS string color -> RGBA via normColor/cssToRgba (pygame.ts:78-96).  First
+    //    use builds the 1x1 probe canvas; a distinct color reuses it; a repeat hits
+    //    the string cache.  Verify by painting the named color and reading it back.
+    pygame.draw.rect(s, "red", new pygame.Rect(0, 0, 40, 30));
+    let px = s.get_at([1, 1]);
+    if (px[0] !== 255 || px[1] !== 0 || px[2] !== 0) fail(`css "red" -> ${px[0]},${px[1]},${px[2]}`);
+    pygame.draw.rect(s, "lime", new pygame.Rect(0, 0, 40, 30)); // distinct: probe reused
+    px = s.get_at([1, 1]);
+    if (px[0] !== 0 || px[1] !== 255 || px[2] !== 0) fail(`css "lime" -> ${px[0]},${px[1]},${px[2]}`);
+    pygame.draw.rect(s, "red", new pygame.Rect(0, 0, 40, 30)); // repeat: cache hit
+    px = s.get_at([1, 1]);
+    if (px[0] !== 255 || px[1] !== 0 || px[2] !== 0) fail(`css "red" (cached) -> ${px[0]},${px[1]},${px[2]}`);
+
+    // -- set_colorkey blit: pixels equal to the key are made transparent on blit
+    //    (_withColorkeyStripped, pygame.ts:459,468-482), so the destination shows
+    //    through there while non-key pixels paint.
+    const src = new pygame.Surface([10, 10]); // constructed opaque BLACK [0,0,0]
+    pygame.draw.rect(src, [9, 9, 9], new pygame.Rect(0, 0, 5, 10)); // left half non-key
+    src.set_colorkey([0, 0, 0]); // black is the key (the right half stays black)
+    const dst = new pygame.Surface([10, 10]);
+    dst.fill([200, 100, 50]); // background the keyed pixels must reveal
+    dst.blit(src, [0, 0]);
+    const keyed = dst.get_at([7, 5]); // right half was the key -> background reveals
+    if (keyed[0] !== 200 || keyed[1] !== 100 || keyed[2] !== 50) fail(`colorkey NOT stripped: ${keyed[0]},${keyed[1]},${keyed[2]}`);
+    const kept = dst.get_at([2, 5]); // left half non-key -> painted over
+    if (kept[0] !== 9 || kept[1] !== 9 || kept[2] !== 9) fail(`colorkey OVER-stripped: ${kept[0]},${kept[1]},${kept[2]}`);
+
+    // -- surfarray.blit_array length guard (pygame.ts:762-765): a mis-sized buffer
+    //    MUST throw (silent mispaint is the failure mode it guards).
+    let guardThrew = false;
+    try {
+      pygame.surfarray.blit_array(new pygame.Surface([4, 4]), new Uint8Array(4 * 4 * 3 - 1));
+    } catch (e) {
+      guardThrew = true;
+      const msg = String((e as Error).message);
+      if (!msg.includes("blit_array")) fail(`blit_array guard wrong error: ${msg}`);
+    }
+    if (!guardThrew) fail("blit_array length guard did not throw");
+
+    // paint a multi-band surface so the driver's non-blank gate passes.
+    const page = newSurf();
+    for (let i = 0; i < 8; i++) {
+      page.fill([(i * 30) & 255, (255 - i * 20) & 255, (i * 53) & 255], new pygame.Rect(i * 128, 0, 128, H));
+    }
+    blit(page);
+
+    return {
+      getRectTopleft: [rt.x, rt.y],
+      getRectCenter: [rc.centerx, rc.centery],
+      cssRoundTrip: true,
+      colorkeyStripped: true,
+      blitArrayGuardThrew: guardThrew,
+    };
+  },
+
+  // ===========================================================================
+  // SCREENS / WIDGETS build+draw states (cluster: screens,ingame,ui,widgets).
+  // The per-module node tests cannot construct font-measured widgets (no canvas in
+  // vitest's node env), and the boot driver only walks MainMenu -> TankInit(human)
+  // -> battlefield, so the Option submenus, the Registration/Sell/Inventory/Save
+  // panels, the AI-radio Tank-Init branch, and the Simultaneous key-capture Frames
+  // are never built or drawn.  Each state builds the REAL screen through its real
+  // (font-measuring) constructor and draws it; a throw is captured by runState
+  // (ok:false -> non-zero exit), and the painted panel passes the blank gate.
+  // ===========================================================================
+
+  // (s1) Hardware submenu: covers OptionsScreen._hw_attrs init, _build's enum /
+  //      toggle / enum_hw_pointer / float / int / action arms, the _enum_selector /
+  //      _toggle / _num_spinner builders + _f2 (float fmt), and -- via the second
+  //      _build call with synthetic display rows -- the display_int / display_toggle
+  //      arms (a documented widget kind no SUBMENUS spec currently uses; the Python
+  //      oracle carries the same branches at screens.py:638,649).  draw runs every
+  //      getter; sweepSetters runs every setter.
+  options_hardware: () => {
+    const cfg = makeCfg({});
+    const screen = new OptionsScreen(cfg as never, W, H, "hardware");
+    (screen as unknown as { _build(rows: unknown[]): void })._build([
+      ["display_int", "_hw_hardware_delay", "~HW Delay:", 0, 500],
+      ["display_toggle", "_hw_mouse_enabled", "~Mouse Enabled"],
+    ]);
+    const surf = newSurf();
+    surf.fill(widgets.C_BG);
+    screen.draw(surf);
+    sweepSetters((screen as unknown as { panel: { widgets: unknown[] } }).panel);
+    screen.draw(surf); // re-render after the setter sweep mutated the bindings
+    blit(surf);
+    return { spec: "hardware", widgets: (screen as unknown as { panel: { widgets: unknown[] } }).panel.widgets.length };
+  },
+
+  // (s2) Play Options submenu: covers the `text` row arm (editable filename
+  //      TextField); sweepSetters' on_text_key runs the bound string setter.
+  options_play: () => {
+    const cfg = makeCfg({});
+    const screen = new OptionsScreen(cfg as never, W, H, "play_options");
+    const surf = newSurf();
+    surf.fill(widgets.C_BG);
+    screen.draw(surf);
+    sweepSetters((screen as unknown as { panel: { widgets: unknown[] } }).panel);
+    screen.draw(surf);
+    blit(surf);
+    return { spec: "play_options", attack: String((cfg as unknown as { ATTACK_COMMENTS: unknown }).ATTACK_COMMENTS) };
+  },
+
+  // (s3) Weapons submenu: covers the weapon_list build (_build_weapon_list /
+  //      _refresh_weapon_toggles incl the scroll-window break), the wheel-scroll
+  //      handler, and the "(scroll for more weapons)" draw hint.
+  options_weapons: () => {
+    const cfg = makeCfg({});
+    const screen = new OptionsScreen(cfg as never, W, H, "weapons");
+    const h = screen as unknown as { handle(e: unknown): unknown; scroll: number };
+    h.handle({ type: pygame.MOUSEBUTTONDOWN, button: 5, pos: [W / 2, 300] }); // wheel down
+    h.handle({ type: pygame.MOUSEBUTTONDOWN, button: 5, pos: [W / 2, 300] });
+    h.handle({ type: pygame.MOUSEBUTTONDOWN, button: 4, pos: [W / 2, 300] }); // wheel up
+    const surf = newSurf();
+    surf.fill(widgets.C_BG);
+    screen.draw(surf);
+    blit(surf);
+    return { spec: "weapons", scroll: h.scroll };
+  },
+
+  // (s4) Registration / about panel: covers the ctor's widest-line font.size() loop
+  //      and the draw's per-line blit loop (RegistrationScreen).
+  registration: () => {
+    const cfg = makeCfg({});
+    const screen = new RegistrationScreen(cfg as never, W, H);
+    const surf = newSurf();
+    screen.draw(surf); // RegistrationScreen.draw fills C_BG itself
+    blit(surf);
+    return { opaque: (screen as unknown as { opaque: boolean }).opaque };
+  },
+
+  // (s5) Inventory panel: covers screens._owned_offensive (the in-ctor weapon-slot
+  //      build), drawn over a live battlefield.
+  inventory: () => {
+    const gs = buildState(13, { SKY: "STARS" });
+    driveToAim(gs);
+    const tank = gs.current_shooter ?? gs.tanks[0];
+    const r = freshRenderer(gs);
+    const surf = newSurf();
+    r.render(surf, gs);
+    const screen = new InventoryScreen(gs as never, tank as never, W, H);
+    screen.draw(surf);
+    blit(surf);
+    return { phase: gs.phase, slots: (screen as unknown as { weapon_slots: number[] }).weapon_slots.length };
+  },
+
+  // (s6) Sell Equipment dialog: covers the quantity Spinner's bound setter
+  //      (SellScreen.setq, this.qty = trunc(v)) via a real adjust, plus _offer/draw.
+  sell: () => {
+    const gs = buildState(13, { SKY: "STARS" });
+    driveToAim(gs);
+    const tank = gs.current_shooter ?? gs.tanks[0];
+    const slot = 1; // Missile (offensive); fund it so owned >= 1
+    (tank as unknown as { inventory: number[] }).inventory[slot] = 5;
+    const r = freshRenderer(gs);
+    const surf = newSurf();
+    r.render(surf, gs);
+    const screen = new SellScreen(gs as never, tank as never, slot, W, H);
+    (screen as unknown as { qty_spin: { adjust(d: number): void } }).qty_spin.adjust(3); // -> setq
+    screen.draw(surf);
+    blit(surf);
+    return { qty: (screen as unknown as { qty: number }).qty, slot };
+  },
+
+  // (s7) Tank-Init in SIMULTANEOUS mode (human): the panel builds six capture Frames
+  //      (the 6-key bind block).  Drawing the panel covers widgets.Frame.draw -- both
+  //      the title-tab branch and the capture branch; frame[0] is armed first so the
+  //      "press a key..." (arming) sub-branch and the C_SEL border also render.
+  tankinit_sim: () => {
+    const cfg = makeCfg({ PLAY_MODE: "SIMULTANEOUS" });
+    const screen = new TankInitScreen(cfg as never, W, H, 0);
+    const frames = (screen as unknown as { sim_frames: { arming: boolean }[] }).sim_frames;
+    if (frames.length > 0) {
+      frames[0].arming = true; // exercise Frame.draw's arming sub-branch + C_SEL
+    }
+    const surf = newSurf();
+    screen.draw(surf);
+    blit(surf);
+    return { simFrames: frames.length, isComputer: (screen as unknown as { is_computer: boolean }).is_computer };
+  },
+
+  // (s8) Tank-Init with the AI (Computer) top region selected: covers the
+  //      is_computer draw branch that _covers the name slot via _rect_union
+  //      (screens._rect_union, the Rect.union helper).
+  tankinit_cpu: () => {
+    const cfg = makeCfg({});
+    const screen = new TankInitScreen(cfg as never, W, H, 1);
+    (screen as unknown as { is_computer: boolean }).is_computer = true;
+    const surf = newSurf();
+    screen.draw(surf);
+    blit(surf);
+    return { isComputer: (screen as unknown as { is_computer: boolean }).is_computer };
+  },
+
+  // (s9) Save dialog with an EXISTING file: the commit raises the yes/no confirm
+  //      instead of clobbering (SaveScreen._commit's exists() branch + _build_confirm
+  //      modal).  Wire a save store whose exists() is true for this state only.
+  save_confirm: () => {
+    setSaveStoreProvider({
+      list: () => [],
+      exists: () => true, // force the "file exists -> confirm" branch
+      write: () => {},
+      read: () => null,
+    });
+    const gs = buildState(13, { SKY: "STARS" });
+    driveToAim(gs);
+    const r = freshRenderer(gs);
+    const surf = newSurf();
+    r.render(surf, gs);
+    const screen = new SaveScreen(gs as never, W, H);
+    (screen as unknown as { name: string }).name = "savetest";
+    (screen as unknown as { _commit(): unknown })._commit(); // -> _build_confirm
+    const confirm = (screen as unknown as { _confirm: { draw(s: pygame.Surface, f: boolean): void } | null })._confirm;
+    screen.draw(surf);
+    if (confirm) {
+      confirm.draw(surf, true); // ensure the confirm modal paints
+    }
+    blit(surf);
+    // restore the neutral (no-op) save store so later states are unaffected.
+    setSaveStoreProvider({ list: () => [], exists: () => false, write: () => {}, read: () => null });
+    return { hasConfirm: confirm !== null };
   },
 };
 

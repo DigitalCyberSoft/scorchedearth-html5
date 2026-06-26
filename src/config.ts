@@ -557,8 +557,10 @@ function pyIntStr(n: number): string {
  *   - signed zero  -> "0.0"/"-0.0"
  *   - else: take JS's shortest round-tripping significant digits, re-place the decimal
  *     point / choose exp form per CPython's threshold, pad the exponent to >=2 digits.
+ * Exported for the differential gate (test/config_more.test.ts) so the scientific /
+ * positional / signed-zero branches can be asserted directly against CPython repr.
  */
-function pyFloatRepr(n: number): string {
+export function pyFloatRepr(n: number): string {
   if (Number.isNaN(n)) return "nan";
   if (n === Infinity) return "inf";
   if (n === -Infinity) return "-inf";
@@ -572,11 +574,12 @@ function pyFloatRepr(n: number): string {
   // shortest-round-trip in V8). Use toExponential() with no arg: gives "d.ddde+NN" /
   // "d.ddde-NN" with the minimal digits that round-trip.
   const exp = a.toExponential(); // e.g. "5e-2", "2e-1", "2e+1", "1.23456789e+5"
-  const m = exp.match(/^(\d)(?:\.(\d+))?e([+\-]\d+)$/);
-  if (!m) {
-    // Defensive fallback: should not happen for finite nonzero doubles.
-    return (neg ? "-" : "") + a.toString();
-  }
+  // m always matches: the guards above returned for NaN/+-Infinity/0, so only a
+  // finite nonzero double reaches here, and Number#toExponential() on such a value
+  // always yields "d[.ddd]e(+/-)NN" which this regex captures. A null m would be a
+  // port bug; the non-null assertion throws loudly on deref rather than masking it
+  // behind a JS-spelled a.toString() that does NOT match CPython repr (DTM 6.8).
+  const m = exp.match(/^(\d)(?:\.(\d+))?e([+\-]\d+)$/)!;
   const lead = m[1];
   const frac = m[2] || "";
   const digits = lead + frac; // all significant digits, no point

@@ -165,8 +165,9 @@ function _oracle(
 }
 
 /** FUN_44b2_000a.c:17-22: the ceiling-clear flatten is armed for every wall
- * sub-mode EXCEPT NONE(0)/CONCRETE(1). Reads cfg.live_elastic. */
-function _wall_flatten_active(state: AIState): boolean {
+ * sub-mode EXCEPT NONE(0)/CONCRETE(1). Reads cfg.live_elastic. Exported for the
+ * differential gate (the live-vs-derived elastic fallback). */
+export function _wall_flatten_active(state: AIState): boolean {
   const mode =
     state.cfg.live_elastic !== undefined
       ? state.cfg.live_elastic
@@ -489,8 +490,9 @@ function _turn_moron(state: AIState, tank: Tank): [number, number, number] {
 }
 
 /** FUN_420d_007e.c:72-77 target pick: the live enemy nearest by HORIZONTAL
- * DISTANCE. */
-function _score_nearest_enemy(state: AIState, tank: Tank): Tank | null {
+ * DISTANCE. The null-exclude wrapper retained for port fidelity (the live dispatch
+ * only calls the _ex form); exported for the differential gate. */
+export function _score_nearest_enemy(state: AIState, tank: Tank): Tank | null {
   return _score_nearest_enemy_ex(state, tank, null);
 }
 
@@ -616,8 +618,9 @@ function _turn_poolshark(state: AIState, tank: Tank): [number, number, number] {
   return [tank.angle, tank.power, pick_weapon(state, tank)];
 }
 
-/** DAT_5f38_5154 in {3,4} gates FUN_415d_0241 (RUBBER/SPRING). */
-function _poolshark_bouncy_walls(state: AIState): boolean {
+/** DAT_5f38_5154 in {3,4} gates FUN_415d_0241 (RUBBER/SPRING). Exported for the
+ * differential gate (the live-vs-derived elastic fallback). */
+export function _poolshark_bouncy_walls(state: AIState): boolean {
   const mode =
     state.cfg.live_elastic !== undefined
       ? state.cfg.live_elastic
