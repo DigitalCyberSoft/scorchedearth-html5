@@ -12,6 +12,16 @@ It reproduces the original's turn-based tank artillery - destructible terrain, t
 weapon shop, the computer players, the physics and wind, the economy and scoring -
 reconstructed function-for-function and verified against the original's behavior.
 
+## Screenshots
+
+Captured from this TypeScript / Canvas port running in the browser:
+
+|   |   |   |
+|:---:|:---:|:---:|
+| <img src="screenshots/menu.png" width="270"><br>Title screen | <img src="screenshots/tank-setup.png" width="270"><br>Player and tank setup | <img src="screenshots/battlefield.png" width="270"><br>A turn in progress |
+| <img src="screenshots/explosion.png" width="270"><br>A shell detonates | <img src="screenshots/death.png" width="270"><br>A direct hit | <img src="screenshots/shop.png" width="270"><br>The weapon shop |
+| <img src="screenshots/control-panel.png" width="270"><br>In-game control panel | <img src="screenshots/rankings.png" width="270"><br>Round rankings | <img src="screenshots/game-over.png" width="270"><br>Final scoring |
+
 ## Credit: Wendell Hicken
 
 Scorched Earth, subtitled "The Mother of All Games," was created by **Wendell Hicken**

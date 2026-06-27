@@ -275,6 +275,73 @@ const STATES: { [name: string]: () => StateMeta } = {
     };
   },
 
+  // (c2) REAL surface impact (used for the README screenshot).  Unlike (c), which
+  //      detonates in MID-AIR for a render test (an explosion floating in open sky is
+  //      not a real game state), this detonates ON the terrain surface (column_top),
+  //      so carve=true cuts a real crater and the fireball sits on the ground.  Left
+  //      on the fresh full-radius frame (the blast is largest at detonation).
+  impact: () => {
+    const gs = buildState(3, { SKY: "SUNSET" });
+    driveToAim(gs);
+    const r = freshRenderer(gs);
+    const cx = Math.trunc(W * 0.3);
+    const cy = gs.terrain.column_top(cx); // ground surface row at cx (terrain.ts:203)
+    damage.explode(gs as unknown as Parameters<typeof damage.explode>[0], cx, cy, 78, true);
+    const surf = newSurf();
+    // Advance to explosion PHASE 1 -- the full-bloom frame that draws the outer ring
+    // plus the red core at EXPLOSION_RING_BASE (render.ts:1118-1121).  phase 0 is the
+    // grow, phase 2 the fade; phase 1 is the canonical mid-explosion, cored look.
+    let guard = 0;
+    while (
+      gs.explosions.length > 0 &&
+      ((gs.explosions[0] as { phase?: number }).phase ?? 0) < 1 &&
+      guard < 60
+    ) {
+      gs._animate_effects();
+      guard++;
+    }
+    // Load the live RED fireball band into gs.lut (game.ts:_tick_explosion_band, the
+    // PURE-RED ramp _EXPLO_HOT_*).  The real app runs this every frame in update();
+    // the harness must call it or the explosion renders with the cream boot palette.
+    gs._tick_palette(1 / 60);
+    r.render(surf, gs);
+    blit(surf);
+    return { phase: gs.phase, cx, cy, explPhase: (gs.explosions[0] as { phase?: number })?.phase ?? -1 };
+  },
+
+  // (d2) REAL kill (used for the README screenshot).  A lethal hit ON the enemy tank
+  //      carves a crater and triggers the NATURAL death_sequence (rising death
+  //      fountains); rendered a few frames in so the fountains are vivid.  No synthetic
+  //      throes (cf. (d), which injects all five kinds mid-air for render coverage).
+  kill: () => {
+    const gs = buildState(42, { SKY: "STORMY" });
+    driveToAim(gs);
+    const r = freshRenderer(gs);
+    const enemy = enemyOf(gs);
+    damage.explode(
+      gs as unknown as Parameters<typeof damage.explode>[0],
+      Math.round(enemy.x),
+      Math.round(enemy.y),
+      82,
+      true,
+    );
+    const surf = newSurf();
+    // advance to explosion phase 1 (the full red-cored blast) ON the enemy tank
+    let guard = 0;
+    while (
+      gs.explosions.length > 0 &&
+      ((gs.explosions[0] as { phase?: number }).phase ?? 0) < 1 &&
+      guard < 60
+    ) {
+      gs._animate_effects();
+      guard++;
+    }
+    gs._tick_palette(1 / 60); // live RED fireball band (see impact)
+    r.render(surf, gs);
+    blit(surf);
+    return { phase: gs.phase, deadEnemy: !enemy.alive, fountains: gs.death_fountains.length };
+  },
+
   // (e) ROUND-END / WIN -> interim rankings panel.  Real path: kill the enemy, run
   //     the real win check + _end_round (scoring.survival_award + scoring.rank),
   //     then render the battlefield with the rankings modal on top -- byte-identical
