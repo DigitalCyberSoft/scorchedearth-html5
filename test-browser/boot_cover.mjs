@@ -39,7 +39,10 @@ async function main() {
   const browser = await chromium.launch({
     channel: "chrome",
     executablePath: "/usr/bin/google-chrome",
-    args: ["--no-sandbox", "--disable-gpu"],
+    // headless (playwright default) + GPU OFF so Chrome never touches the host display
+    // or GPU; --disable-dev-shm-usage avoids /dev/shm exhaustion (a real headless-crash
+    // cause); --disable-software-rasterizer forbids any raster fallback engaging the GPU.
+    args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-software-rasterizer"],
   });
   const page = await browser.newPage({
     viewport: { width: 1024, height: 768 },

@@ -18,9 +18,26 @@
 # Usage:  bash scripts/coverage_all.sh   (or: npm run coverage:all)
 set -uo pipefail
 
+# RESOURCE GUARD (added 2026-06-27, after a heavy parallel run was blamed for desktop
+# sluggishness): re-exec the WHOLE pipeline (vite + chrome + node + vitest children) at
+# the lowest CPU/IO priority so it always yields to the interactive desktop.  nice is
+# always present; ionice is used only if available.
+if [ -z "${COV_RENICED:-}" ]; then
+  RN="nice -n 19"; command -v ionice >/dev/null 2>&1 && RN="ionice -c3 $RN"
+  exec env COV_RENICED=1 $RN bash "$0" "$@"
+fi
+
 ROOT="/home/user/Scorched Earth/scorch-html5"
 PORT="${TB_PORT:-4188}"
 cd "$ROOT"
+
+# Serialize: only ONE coverage:all at a time, machine-wide.  The footprint problem was
+# FOUR parallel agents each running this at once (4 vite servers + 8 headless Chrome +
+# 4 vitest pools).  flock makes a concurrent run bail instead of piling on.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"/tmp/scorch_coverage_all.lock"
+  flock -n 9 || { echo "FAIL: another coverage:all is running (/tmp/scorch_coverage_all.lock); refusing to pile on."; exit 3; }
+fi
 
 rc_node=0; rc_render=0; rc_boot=0
 

@@ -8,12 +8,13 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "bash scripts/capped.sh vitest run",
+    "test:uncapped": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "coverage:node": "vitest run --coverage",
+    "coverage:node": "CAP_MEM=8G bash scripts/capped.sh vitest run --coverage",
     "coverage:merge": "node scripts/coverage_merge.mjs",
-    "coverage:all": "bash scripts/coverage_all.sh"
+    "coverage:all": "CAP_MEM=12G bash scripts/capped.sh bash scripts/coverage_all.sh"
   },
   "devDependencies": {
     "@types/node": "^22.8.0",
