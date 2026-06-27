@@ -698,7 +698,7 @@ export class App {
       diag.log.error("cannot start game: no GameStateFactory wired (engine not integrated)");
       return;
     }
-    const seed = _ticksMs();
+    const seed = _newSeed();
     const gs = _gameStateFactory(this.cfg, this.w, this.h, seed);
     this.gs = gs;
     for (const [name, ai_class, team, tank_icon] of this._setup) {
@@ -1129,7 +1129,7 @@ function _keyGetPressed(): { [code: number]: boolean } {
   return _keysHeld;
 }
 
-/** Monotonic ms since boot (pygame.time.get_ticks analog), used to seed the RNG. */
+/** Monotonic ms since boot (pygame.time.get_ticks analog); folded into the RNG seed. */
 const _bootMs = _nowMs();
 function _ticksMs(): number {
   return Math.trunc(_nowMs() - _bootMs);
@@ -1140,6 +1140,26 @@ function _nowMs(): number {
     return performance.now();
   }
   return Date.now();
+}
+
+/** RNG seed for a new game.  The DOS/pygame original seeds from a clock (main.py:477
+ *  `seed = pygame.time.get_ticks()`) purely so each launch plays a different game.
+ *  `_ticksMs()` is the faithful clock analog, but `seed = trunc(now - bootMs)` collapses
+ *  to a CONSTANT when the browser clamps performance.now() to a coarse grid (Firefox
+ *  privacy.reduceTimerPrecision / resistFingerprinting, Tor) AND the boot->build path is
+ *  consistent: both samples fall in the same grid cell, so the elapsed value -- and thus
+ *  the seeded stream, the sky, the terrain -- is pinned to one outcome every run.  (At a
+ *  100ms grid the seed is constant; at Chrome's 0.1ms grid it survives.)  Harvest real
+ *  entropy so the seed never depends on timer resolution, XOR-folded with the clock analog
+ *  to keep the original's flavor and to degrade gracefully when WebCrypto is absent. */
+function _newSeed(): number {
+  const t = _ticksMs() >>> 0; // get_ticks clock analog (the original's entropy source)
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  const r =
+    c && typeof c.getRandomValues === "function"
+      ? c.getRandomValues(new Uint32Array(1))[0]
+      : Date.now() >>> 0; // no WebCrypto: wall-clock epoch ms still differs per run
+  return (t ^ r) >>> 0;
 }
 
 /** Present the logical backbuffer to the on-screen #game canvas (pygame.display
