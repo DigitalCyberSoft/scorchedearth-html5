@@ -507,6 +507,28 @@ export class IndexedDbSaveStore implements SaveStoreProvider {
 }
 
 // ===========================================================================
+// GameState <-> SaveGameState terrain bridge (main.py has none: numpy arrays
+// carry their own shape, so savegame.py reads grid.shape directly).  In this
+// port the live engine terrain is a flat column-major Uint8Array with w/h on the
+// Terrain (terrain.ts), while savegame.ts serializes a {w,h,data} TerrainGrid.
+// SaveScreen/RestoreScreen are written + tested against the SaveGameState shape;
+// main owns the live GameState, so the reshape lives here, at the boundary.
+// ===========================================================================
+
+/** Present the live GameState to SaveScreen as a SaveGameState: reshape terrain
+ *  to the {grid:{w,h,data}} the serializer reads, sharing every other field by
+ *  reference (savegame.save only reads, and the game is paused under the modal).
+ *  Without this, savegame.save reads `.data` on a bare Uint8Array (undefined) and
+ *  throws in b64encode -- the in-game Save Game was dead before this. */
+function _toSaveView(gs: GameStateLike): unknown {
+  const terr = gs.terrain as { w: number; h: number; grid: Uint8Array };
+  return {
+    ...(gs as GameStateLike),
+    terrain: { grid: { w: terr.w, h: terr.h, data: terr.grid } },
+  };
+}
+
+// ===========================================================================
 // App  (main.py:344)
 // ===========================================================================
 
@@ -804,7 +826,7 @@ export class App {
       if (this.top instanceof ingame.SystemMenuScreen) {
         this.pop(); // drop the menu before the dialog
       }
-      this.push(new SaveScreen(gs as unknown as never, this.w, this.h) as unknown as StackScreen);
+      this.push(new SaveScreen(_toSaveView(gs) as unknown as never, this.w, this.h) as unknown as StackScreen);
     } else if (action === "restore_game") {
       if (this.top instanceof ingame.SystemMenuScreen) {
         this.pop();
@@ -822,11 +844,34 @@ export class App {
         this._enter_shop(); // teams assigned -> pre-round shop
       } else if (restored !== null && restored !== undefined) {
         // Restore Game succeeded: adopt the rebuilt GameState, resume on a fresh
-        // GameScreen (drop any overlay stack).
+        // GameScreen (drop any overlay stack).  savegame.apply wrote terrain.grid
+        // as a {w,h,data} TerrainGrid (its on-disk shape); the live engine Terrain
+        // indexes a flat Uint8Array (terrain.ts grid[x*h+y]), so unwrap it back
+        // before the renderer / GameScreen read the board.
         const rgs = restored as GameStateLike;
-        this.gs = rgs;
-        this.renderer = new Renderer(rgs.cfg, rgs.w, rgs.h);
-        this.stack = [new GameScreen(this, rgs) as unknown as StackScreen];
+        const terr = rgs.terrain as { grid: unknown; w: number; h: number };
+        const tg = terr.grid as { data?: Uint8Array };
+        const bytes = tg?.data;
+        if (bytes instanceof Uint8Array && bytes.length === terr.w * terr.h) {
+          terr.grid = bytes; // flat column-major Uint8Array the engine expects
+          this.gs = rgs;
+          this.renderer = new Renderer(rgs.cfg, rgs.w, rgs.h);
+          this.stack = [new GameScreen(this, rgs) as unknown as StackScreen];
+        } else {
+          // The save's terrain dimensions differ from the live game's; Terrain has
+          // readonly w/h (terrain.ts) and cannot be resized in place, so adopting a
+          // mis-sized grid would mis-index every read.  Refuse rather than corrupt
+          // the board: surface it and fall back to the main menu.
+          diag.log.error(
+            "restore: terrain %s bytes != live %dx%d=%d; cannot restore across resolutions",
+            bytes instanceof Uint8Array ? bytes.length : "?",
+            terr.w,
+            terr.h,
+            terr.w * terr.h,
+          );
+          this.gs = null;
+          this.stack = [new MainMenuScreen(this.cfg as unknown as never, this.w, this.h) as unknown as StackScreen];
+        }
       }
     } else if (action === "fire") {
       this.pop();
