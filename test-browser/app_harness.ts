@@ -335,15 +335,70 @@ const SCENARIOS: { [name: string]: () => unknown | Promise<unknown> } = {
     const app = newApp({ PLAY_MODE: "SIMULTANEOUS" });
     const gs = buildGs(3, { PLAY_MODE: "SIMULTANEOUS" }, [["P1", C.AI_HUMAN, 0, 0], ["AI", C.AI_SHOOTER, 0, 1]]);
     app.gs = gs;
-    // re-root the App stack on a GameScreen for this gs via the real restore-adopt path.
+    // re-root the App stack on a GameScreen for this gs via the real restore-adopt
+    // path.  A REAL restore hands over terrain.grid in the savegame {w,h,data}
+    // shape (savegame.apply's on-disk form); the adopt (main.ts "pop"+restored)
+    // unwraps it back to the engine's flat Uint8Array and REFUSES a bare grid
+    // (the b87a97f cross-res guard would drop to the main menu and this
+    // scenario would silently stop covering the SIM branches -- which is
+    // exactly what happened until the kd/inp probes below caught it).
+    const terr = gs.terrain as unknown as { grid: unknown; w: number; h: number };
+    terr.grid = { w: terr.w, h: terr.h, data: terr.grid as Uint8Array };
     (app.top as { restored?: unknown }).restored = gs;
     app._act("restore_game"); // push RestoreScreen
     (app.top as { restored?: unknown }).restored = gs;
     app._act("pop"); // RestoreScreen.restored set -> adopt rgs, fresh GameScreen
     must(gs.phase === SIM_LIVE, `phase sim_live, got ${gs.phase}`);
-    app.step(1000, [KEY(pygame.K_a)] as never); // GameScreen.handle sim branch -> _sim_human_keydown
-    app.step(1080, [] as never); // GameScreen.update sim branch -> _sim_human_input
-    return { phase: gs.phase };
+    // The adopt leaves a zoom-wipe animating, and App.step feeds any KEYDOWN to
+    // _wipe.skip() while one is live -- an immediate K_a would be eaten and the
+    // GameScreen SIM branches never exercised (the phase-only must() above
+    // cannot tell).  Settle the wipe first, then PROVE the path is open.
+    const t = settleWipe(app, 1000);
+    must(app._wipe === null, "adopt wipe settled; events reach GameScreen");
+    // Count-probe both SIM entry points: coverage alone cannot distinguish "the
+    // event never arrived" from a line-attribution artifact, and the phase-only
+    // return can't either.  The wrappers delegate, so the main.ts call sites
+    // still execute their own lines.
+    const gsx = gs as unknown as {
+      _sim_human_keydown(k: number): unknown;
+      _sim_human_input(keys: unknown, dt: number): unknown;
+    };
+    let kd = 0;
+    let inp = 0;
+    const origKd = gsx._sim_human_keydown.bind(gs);
+    const origInp = gsx._sim_human_input.bind(gs);
+    gsx._sim_human_keydown = (k: number) => {
+      kd += 1;
+      return origKd(k);
+    };
+    gsx._sim_human_input = (keys: unknown, dt2: number) => {
+      inp += 1;
+      return origInp(keys, dt2);
+    };
+    app.step(t, [KEY(pygame.K_a)] as never); // GameScreen.handle sim branch -> _sim_human_keydown
+    app.step(t + 80, [] as never); // GameScreen.update sim branch -> _sim_human_input
+    const topName = (app.top as { constructor: { name: string } }).constructor.name;
+    const gsSame = (app.top as { gs?: unknown }).gs === gs;
+    must(kd >= 1, `KEYDOWN reached _sim_human_keydown (kd=${kd} top=${topName} gsSame=${gsSame} phase=${gs.phase})`);
+    must(inp >= 1, `update reached _sim_human_input (inp=${inp} top=${topName})`);
+    return { phase: gs.phase, kd, inp };
+  },
+
+  // -- restore-adopt REFUSE branch (the b87a97f cross-res guard): a restored gs
+  //    whose terrain.grid is NOT the savegame {w,h,data} shape (here: a live flat
+  //    Uint8Array) must be refused -- app.gs nulled, stack dropped to the menu --
+  //    rather than adopted with a grid every read would mis-index.
+  restore_refuse: () => {
+    const app = newApp();
+    const gs = buildGs(4, {}, [["P1", C.AI_HUMAN, 0, 0], ["P2", C.AI_HUMAN, 0, 1]]);
+    (app.top as { restored?: unknown }).restored = gs;
+    app._act("restore_game"); // push RestoreScreen
+    (app.top as { restored?: unknown }).restored = gs;
+    app._act("pop"); // adopt attempt: bare grid -> the guard refuses
+    const topName = (app.top as { constructor: { name: string } }).constructor.name;
+    must(topName === "MainMenuScreen", `refused adopt falls back to the menu (top=${topName})`);
+    must((app as { gs?: unknown }).gs === null, "refused adopt nulls app.gs");
+    return { top: topName };
   },
 
   // -- fire action: pop the launch dialog, then gs.fire() at AIM.
