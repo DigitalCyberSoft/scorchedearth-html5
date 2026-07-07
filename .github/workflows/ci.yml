@@ -1,10 +1,13 @@
 name: CI
 
-# Typecheck + the full vitest suite on every push and pull request. This is the
-# quality gate; deploy.yml (build + Pages publish) runs separately on push to main.
+# Typecheck + production build on every push and pull request -- the self-contained
+# gate. The full differential vitest suite is intentionally NOT run in CI: it reads
+# ~77 MB of golden vectors generated from the separate scorch-py Python port
+# (oracle/vectors/, gitignored by design; regenerate locally with oracle/dump_*.py),
+# so the differential suite stays a local pre-push gate. deploy.yml handles the
+# build + Pages publish on push to the default branch.
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -13,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -28,8 +31,5 @@ jobs:
       - name: Install (locked)
         run: npm ci
 
-      - name: Typecheck (tsc --noEmit)
-        run: npm run typecheck
-
-      - name: Test (vitest run; uncapped -- no systemd on the runner)
-        run: npm run test:uncapped
+      - name: Typecheck + build (tsc --noEmit && vite build; vector-free)
+        run: npm run build
