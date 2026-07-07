@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Scorched Earth</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      #game { display: block; margin: 0 auto; image-rendering: pixelated; }
+      /* Preloader: covers the canvas until main.ts has fetched every asset and the
+         first menu frame is drawn, then gets the .done class (display:none). This is
+         why the whole game works the instant it appears -- nothing loads late. */
+      #loading {
+        position: fixed; inset: 0; z-index: 10;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        background: #000; color: #ddd;
+        font-family: "Consolas", "Courier New", monospace; user-select: none;
+      }
+      #loading h1 {
+        margin: 0 0 6px; font-size: 44px; letter-spacing: 5px; color: #fff;
+        text-shadow: 3px 3px 0 #b25a00;
+      }
+      #loading .sub { color: #e08bb0; margin-bottom: 28px; font-size: 18px; }
+      #loading .bar {
+        width: 340px; height: 16px; border: 1px solid #666; background: #141414; overflow: hidden;
+      }
+      #loading .bar > i {
+        display: block; height: 8%; width: 8%; height: 100%;
+        background: linear-gradient(90deg, #7a3b00, #d6892f);
+        transition: width .25s ease-out;
+        animation: pulse 1s ease-in-out infinite;
+      }
+      @keyframes pulse { 50% { opacity: .55; } }
+      #loading .pct { margin-top: 10px; font-size: 13px; color: #9a9a9a; }
+      #loading.done { display: none; }
+    </style>
+    <script type="module" crossorigin src="./assets/index-BapTTRWe.js"></script>
+  </head>
+  <body>
+    <canvas id="game" width="1024" height="768"></canvas>
+    <div id="loading">
+      <h1>SCORCHED EARTH</h1>
+      <div class="sub">The Mother of All Games</div>
+      <div class="bar"><i id="loading-bar"></i></div>
+      <div class="pct" id="loading-pct">Loading&hellip;</div>
+    </div>
+  </body>
+</html>
