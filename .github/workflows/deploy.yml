@@ -1,0 +1,53 @@
+name: Deploy to GitHub Pages
+
+# Build the browser game and publish dist/ to the gh-pages branch that GitHub
+# Pages already serves for this repo. Runs on every push to main, and can be
+# started by hand from the Actions tab (workflow_dispatch).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only the built-in, per-run token is used, scoped to pushing the built site.
+permissions:
+  contents: write
+
+# One deploy at a time; a newer push cancels an in-flight run so the branch
+# always ends on the latest build.
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Build (tsc --noEmit && vite build -> dist/)
+        run: npm run build
+
+      - name: Publish dist/ to gh-pages
+        # First-party GITHUB_TOKEN only; no external action. gh-pages is a build
+        # artifact branch (not history), so force-push the fresh build as one commit.
+        run: |
+          cd dist
+          touch .nojekyll   # disable Jekyll so no asset path is silently dropped
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy ${GITHUB_SHA} to Pages"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
