@@ -641,8 +641,10 @@ def scen_effects():
     gs = build(cfg, 7, [("A", C.AI_HUMAN, 0, 0)])
     gs.new_game()
     throws = {}
-    for kind in ("spiral", "ring", "geyser", "sparkle", "sink"):
-        # fresh gs per kind so the rng stream for sparkle parts is pinned
+    for kind in ("ball", "ring", "fireworks", "sink"):
+        # the decoded FUN_271b_0005 throe kinds (case 4/9/7/8); the former
+        # spiral/geyser/sparkle kinds were misassigned readings and are REMOVED.
+        # fresh gs per kind so the rng stream for fireworks parts is pinned
         gs2 = build(make_cfg(MAXROUNDS=10, INITIAL_CASH=0, MAX_WIND=0), 7,
                     [("A", C.AI_HUMAN, 0, 0)])
         gs2.new_game()

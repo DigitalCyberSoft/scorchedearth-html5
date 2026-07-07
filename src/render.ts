@@ -971,6 +971,14 @@ export class Renderer {
     }
   }
 
+  // Draw the death-throe animations (#21): spiral / sparkle / debris / ball /
+  // ring / fireworks / sink, each computed from its frame.  Kinds re-anchored
+  // to the byte decode (scorch-re/notes_death_throe_roulette.md s.2.4 + the
+  // 2026-07-07 case-body disassemblies: case 5 stroke spiral, case 6 sparkle
+  // dissolve, case 10 hull-debris scatter, case 4 expanding blue-white ball,
+  // case 7 fireworks 6-launches+shimmer, case 8 sink, case 9 expanding trig
+  // rings); the case bodies live in undecompiled/FP-mangled segments, so the
+  // stroke GEOMETRY is RECONSTRUCTED to those decoded entries/labels.
   private _draw_throe_fx(surf: pygame.Surface, state: GameState): void {
     const fx = getList<ThroeLike>(state, "throe_fx");
     if (fx.length === 0) {
@@ -979,10 +987,20 @@ export class Renderer {
     const W = this.w;
     const H = this.h;
     const put = (px: number, py: number, c: RGB): void => {
+      // RECONSTRUCTED stroke weight: 2x2 blocks.  The pattern geometry is
+      // unchanged; a lone set_at on the port's 1024-wide field subtends a
+      // third of a mode-13h pixel and the strokes read as noise (the
+      // reported "only one death animation" -- throes drawn but illegible).
       const ix = Math.trunc(px);
       const iy = Math.trunc(py);
-      if (ix >= 0 && ix < W && iy >= 0 && iy < H) {
-        surf.set_at([ix, iy], c);
+      for (const ox of [0, 1]) {
+        for (const oy of [0, 1]) {
+          const x2 = ix + ox;
+          const y2 = iy + oy;
+          if (x2 >= 0 && x2 < W && y2 >= 0 && y2 < H) {
+            surf.set_at([x2, y2], c);
+          }
+        }
       }
     };
     for (const e of fx) {
@@ -993,6 +1011,9 @@ export class Renderer {
       const base = tupRgb(lutGet(this._active, e.color));
       const hot: RGB = [Math.min(255, base[0] + 90), Math.min(255, base[1] + 90), Math.min(255, base[2] + 90)];
       if (kind === "spiral") {
+        // case 5: stroke spiral.  271b:0543 disassembled: Archimedean sweep via
+        // the cos/sin pair + vector strokes + particles.  Stroke geometry
+        // RECONSTRUCTED.
         const tmax = fcount * 0.5;
         let th = 0.0;
         while (th < tmax) {
@@ -1000,7 +1021,40 @@ export class Renderer {
           put(cx + r * Math.cos(th), cy - r * Math.sin(th), Math.trunc(th * 2) % 2 ? hot : base);
           th += 0.32;
         }
+      } else if (kind === "sparkle") {
+        // case 6: dissolve shower
+        for (const p of e.parts ?? []) {
+          put(p[0], p[1], hot);
+          put(p[0], p[1] - 1, base);
+        }
+      } else if (kind === "debris") {
+        // case 10: hull pieces.  Chunky 2-stack fragments in the tank's colour
+        // over grey (the 49d4:0177 stroke buffer scattered by 37d2:0392;
+        // RECONSTRUCTED).
+        const grey: RGB = [110, 110, 110];
+        for (const p of e.parts ?? []) {
+          put(p[0], p[1], base);
+          put(p[0] + 1, p[1], grey);
+          put(p[0], p[1] - 2, (fcount + Math.trunc(p[0])) % 3 === 0 ? hot : base);
+        }
+      } else if (kind === "ball") {
+        // case 4: expanding ball.  Blue-white swatch per the decoded DAC setup
+        // 556b:0005(0xfe, 0x1e,0x1e,0x3f); radius grows with frame (rand(6)+5
+        // steps drive `life`), soft filled disc.
+        const rad = 2 + fcount * 0.9;
+        const bw_hot: RGB = [200, 200, 255];
+        const bw_base: RGB = [120, 130, 220];
+        let rr = 1;
+        while (rr <= Math.trunc(rad)) {
+          const steps = Math.max(8, Math.trunc(rr * 4));
+          for (let k = 0; k < steps; k++) {
+            const a = (k * 2 * Math.PI) / steps;
+            put(cx + rr * Math.cos(a), cy - rr * Math.sin(a), rr > rad - 3 ? bw_hot : bw_base);
+          }
+          rr += 2;
+        }
       } else if (kind === "ring") {
+        // case 9: expanding trig rings
         const rad = 3 + fcount * 1.7;
         for (let k = 0; k < 12; k++) {
           const a = (k * Math.PI) / 6 + fcount * 0.04;
@@ -1010,22 +1064,29 @@ export class Renderer {
             put(cx + rr * ca, cy - rr * sa, rr > rad - 6 ? hot : base);
           }
         }
-      } else if (kind === "geyser") {
-        const top = cy - fcount * 4;
-        for (let j = 0; j < 6; j++) {
-          const ox = Math.trunc((j - 2.5) * 5);
-          let yy = cy;
-          while (yy > top) {
-            put(cx + ox + (Math.trunc(yy) % 3 ? 1 : -1), yy, yy < top + 8 ? hot : base);
-            yy -= 2;
+      } else if (kind === "fireworks") {
+        // case 7: 6 launches + shimmer.  First half of life: 6 rising launch
+        // streaks; second half: the shimmer particle burst (parts fall under
+        // game-side gravity).
+        const half = Math.floor(e.life / 2);
+        if (fcount <= half) {
+          const top = cy - fcount * 4;
+          for (let j = 0; j < 6; j++) {
+            const ox = Math.trunc((j - 2.5) * 6);
+            let yy = cy;
+            while (yy > top) {
+              put(cx + ox, yy, yy < top + 8 ? hot : base);
+              yy -= 3;
+            }
+          }
+        } else {
+          for (const p of e.parts ?? []) {
+            put(p[0], p[1], hot);
+            put(p[0], p[1] - 1, base);
           }
         }
-      } else if (kind === "sparkle") {
-        for (const p of e.parts ?? []) {
-          put(p[0], p[1], hot);
-          put(p[0], p[1] - 1, base);
-        }
       } else if (kind === "sink") {
+        // case 8: sink into ground
         for (let k = 0; k < 16; k++) {
           const sx = cx + (k - 8) * 2;
           const sy = cy - 6 + ((fcount + k * 3) % 14);
@@ -1510,6 +1571,7 @@ interface InfoBoxLike {
 interface ThroeLike {
   kind: string;
   frame: number;
+  life: number;
   x: number;
   y: number;
   color: number;

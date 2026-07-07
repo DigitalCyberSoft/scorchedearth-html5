@@ -292,7 +292,13 @@ export function kill_tank(state: State, victim: Tank, weapon: unknown = null): v
   }
   victim.alive = false;
   victim.health = 0;
-  scoring.award_kill(state as unknown as scoring.State, state.current_shooter, victim);
+  // NO award here: the binary awards inside the kill roulette (FUN_271b_0005
+  // offset 006d -> FUN_4098_0263) when the dead-tank sweep PROCESSES the
+  // corpse, not when health crosses zero.  The port's death queue fires the
+  // ["award", tank] signal at that processing point (death.step_queue), where
+  // game runs scoring.award_kill + the die taunt.  A stub state without the
+  // queue (dump mocks) gets FX only, matching the old caller-owns-scoring
+  // split.  See scorch-re/notes_death_throe_roulette.md s.2.1.
   if (weapon === null) {
     weapon = state.current_weapon ?? null;
   }

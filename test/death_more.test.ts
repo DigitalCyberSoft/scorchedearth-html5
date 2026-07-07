@@ -1,9 +1,10 @@
 /**
  * Coverage mop-up: the getattr-style DEFAULT branches death.test.ts never hit --
  * _blast_radius's explosion_scale fallback (state lacking the attr) and the
- * color=15 fallback in _debris_fountain / _spawn_throe when the dying tank has no
- * `color`. _blast_radius defaults are differential vs oracle/dump_more.py
- * (Python int(FALLBACK*scale)); the color sentinel is the Python getattr default.
+ * color=15 fallback in _debris_fountain / _case_body_immediate when the dying
+ * tank has no `color`. _blast_radius defaults are differential vs
+ * oracle/dump_more.py (Python int(FALLBACK*scale)); the color sentinel is the
+ * Python getattr default.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -52,7 +53,7 @@ describe("death(more): color=15 default when the tank has no `color`", () => {
     expect(got!.color).toBe(vec.default_color);
   });
 
-  it("_spawn_throe hands color 15 to add_throe", () => {
+  it("_case_body_immediate hands color 15 to add_throe", () => {
     let gotCol: number | null = null;
     const state = {
       add_explosion: () => {},
@@ -61,7 +62,7 @@ describe("death(more): color=15 default when the tank has no `color`", () => {
       },
     } as unknown as DState;
     const tank = { x: 200, y: 300 } as unknown as DTank; // no `color`
-    death._spawn_throe(state, tank, 5, 18); // throe 5 = spiral -> add_throe
+    death._case_body_immediate(state, tank, 9); // roll 9 = ring -> add_throe
     expect(gotCol).toBe(vec.default_color);
   });
 });

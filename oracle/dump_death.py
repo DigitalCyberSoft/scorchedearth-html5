@@ -1,37 +1,42 @@
 #!/usr/bin/env python3
-"""Oracle vector dumper for the `death` module (tank death sequence + throes).
+"""Oracle vector dumper for the `death` module (kill roulette + ascension).
 
 Drives the Python port's REAL scorch.death functions (the fidelity reference,
-itself byte-verified against 1.5/SCORCH.EXE) over deterministic, rng-seeded input
-batteries and writes golden vectors to vectors/death.json.  The TypeScript
-differential gate (test/death.test.ts) loads this JSON and asserts the TS port
-(src/death.ts) reproduces every result EXACTLY (integers / indices / pixels /
-booleans / strings).
+itself byte-verified against 1.5/SCORCH.EXE -- the FUN_271b_0005 kill roulette
++ the FUN_3ef5_029a ascension, scorch-re/notes_death_throe_roulette.md) over
+deterministic, rng-seeded input batteries and writes golden vectors to
+vectors/death.json.  The TypeScript differential gate (test/death.test.ts)
+loads this JSON and asserts the TS port (src/death.ts) reproduces every result
+EXACTLY (integers / indices / signals / booleans / strings).
 
-death.py is integer-only itself (radius truncation + throe/fountain params); the
-ONE transcendental dependency is inside damage.explode (the radial-damage law's
-math.hypot), which is measured between INTEGER pixel coordinates and so is
-bit-exact in the TS port (damage.ts NUMERIC NOTES, already a green gate).  Every
+death.py is integer-only itself (radius truncation, the rand(11) roll, the
+sink-depth pick, the ball-steps pick); the one transcendental dependency lives
+in the callee: damage.explode's radial law measures INTEGER pixel coordinates
+(bit-exact in the TS port, the damage.ts NUMERIC NOTES result).  No roulette
+case spawns a projectile or consumes ammo (byte-verified); the staged battery
+still pins step_queue's live-flight HOLD by injecting a mock flight.  Every
 value dumped here is therefore asserted EXACT.
 
 This is a STATIC use of the Python port: it imports scorch.death headless
 (SDL_VIDEODRIVER=dummy) and calls its functions against lightweight mock
 Tank/Cfg/Terrain/Rng/State objects exposing exactly the duck-typed fields the
-sequence reads (catalog 11/20).  It never runs the DOS binary.
+sequences read.  It never runs the DOS binary.
 
 DETERMINISM: every battery that touches rng seeds a fresh scorch.rng.Rng(seed)
-with a fixed seed, so the TS side (new Rng(seed)) reproduces the same MT19937
-stream value-for-value (the rng linchpin is already a green differential gate).
+(the MT19937 linchpin, a green gate).  Batteries that must exercise a SPECIFIC
+roulette case wrap the seeded Rng in _ForcedPicks: a delegate whose first
+pick(11) calls return scripted rolls, everything else passing through -- the
+same scripted-roll technique the engine smoke checks use, mirrored 1:1 in the
+TS test.
 
-THE DEATH CHAIN: death_sequence -> _spawn_throe (add_explosion / add_throe) ->
-_debris_fountain (add_death_fountain, or the fallback add_explosion when the
-emitter is absent) -> _final_blast (damage.explode -> carve_circle +
-add_explosion + the per-tank radial damage -> apply_tank_damage -> shield gate /
-health / kill_tank -> on_tank_destroyed + scoring).  The dumper snapshots EVERY
-observable: the throe int returned, the ordered explosion log, the throe-emitter
-log, the fountain log, the carve log, the destroyed log, and the post-state of
-every tank (health/shield/alive/score/cash).  The TS test rebuilds an identical
-mock and asserts each.
+THE DEATH CHAIN under test:
+  * death_sequence  -> enqueue (queue states) / _roll_throe+_case_body_immediate
+                       (stub states without death_queue)
+  * retreat_sequence-> enqueue ascension / immediate fountain+grave blast
+  * step_queue      -> the staged FIFO: award/front/thud/blast/sink/cookoff/
+                       climb signals, stage waits on throe_fx / death_fountains,
+                       the live-projectile hold, chain FIFO order
+  * _debris_fountain / _blast_radius / _roll_throe helpers
 
 Structure copies oracle/dump_weapon_behaviors.py.
 
@@ -73,7 +78,7 @@ def _count(payload):
             if not isinstance(v, dict):
                 continue
             for key, val in v.items():
-                if key in ("fn", "label", "note", "name", "behavior"):
+                if key in ("fn", "label", "note", "name", "behavior", "case"):
                     continue
                 if isinstance(val, list):
                     total += _leaves(val)
@@ -95,23 +100,49 @@ def _leaves(x):
 # (test/death.test.ts) builds STRUCTURALLY IDENTICAL mocks so the only thing
 # under differential test is the death-sequence arithmetic / control flow.
 # These mirror oracle/dump_weapon_behaviors.py's mocks (same field order, same
-# callback logging), extended with add_throe / add_death_fountain and state.w.
+# callback logging), extended with the queue surface (death_queue / throe_fx /
+# death_fountains / projectiles), the cook-off predicate fields
+# (selected_weapon / has_ammo), state.h (the sink floor clamp) and the
+# ICON_BAR / SUSPEND_DIRT cfg reads.
 # ---------------------------------------------------------------------------
 import scorch.constants as C  # noqa: E402
 from scorch.rng import Rng  # noqa: E402
 
 
+class _ForcedPicks:
+    """Delegate rng wrapper: the first len(forced) pick(11) calls return the
+    scripted rolls in order; every other pick (and every later pick(11))
+    delegates to the real seeded Rng.  Lets a battery drive a SPECIFIC roulette
+    case while the case body's own picks (ball steps, sink depth, cook-off
+    angle/power) stay on the shared deterministic stream."""
+
+    def __init__(self, rng, forced):
+        self._rng = rng
+        self._forced = list(forced)
+
+    def pick(self, n):
+        if n == 11 and self._forced:
+            return self._forced.pop(0)
+        return self._rng.pick(n)
+
+
 class MockCfg:
-    def __init__(self, sound=True):
+    def __init__(self, sound=True, icon_bar=False, suspend_dirt=0):
         # scoring/team_mode read by damage.explode -> scoring.award_*; pin to
         # values that make the awards deterministic (STANDARD, no teams).
         self.scoring = C.SCORING_STANDARD
         self.team_mode = C.TEAM_NONE
+        # _roll_throe's case-8 reroll gate (DAT_5f38_50d8 analogue).
+        self.SUSPEND_DIRT = suspend_dirt
         self._sound = sound
+        self._icon_bar = icon_bar
 
     def is_on(self, key):
         if key == "SOUND":
             return self._sound
+        if key == "ICON_BAR":
+            # _debris_fountain's top clip: bar bottom (29) vs playfield top (9).
+            return self._icon_bar
         return False
 
 
@@ -123,7 +154,7 @@ class MockEconomy:
 class MockTank:
     def __init__(self, tid, x=200, y=300, color=15, half_width=7, health=100,
                  shield_hp=0, shield_item=0, alive=True, player_index=0,
-                 team_id=0):
+                 team_id=0, selected_weapon=0, ammo=0):
         self.id = tid
         self.x = x
         self.y = y
@@ -138,9 +169,19 @@ class MockTank:
         self.score = 0
         self.cash = 0
         self.win_counter = 0
-        self.inventory = []
+        # case-10 predicate surface: armed weapon + a flat per-slot ammo store.
+        # The mock's has_ammo is deliberately simpler than objects.Tank (no
+        # slot-0 infinite special case) so the predicate outcome is pinned by
+        # `ammo` alone; identical in the TS mock.  Nothing is consumed (the
+        # decoded cook-off is a visual hull scatter).
+        self.selected_weapon = selected_weapon
+        self.inventory = [0] * 80
+        self.inventory[selected_weapon] = ammo
         self.hits_this_round = {}
         self.hits_career = {}
+
+    def has_ammo(self, slot):
+        return self.inventory[slot] > 0
 
 
 class MockTerrain:
@@ -161,49 +202,69 @@ class MockTerrain:
 
 
 class MockState:
-    """The death-sequence game-state surface.  Exposes:
+    """The death game-state surface.  Exposes:
       - the damage-chain fields (cfg/economy/tanks/terrain/current_shooter/
         current_weapon) so damage.explode -> apply_tank_damage -> scoring works,
-      - `w` (playfield width) read by the _debris_fountain FALLBACK clamp,
-      - rng for the rand(11) throe roulette,
-      - explosion_scale for _blast_radius,
+      - `w`/`h` (playfield dims: the fallback clamp + the sink floor clamp),
+      - rng for the rand(11) roulette + per-case picks,
+      - explosion_scale for _blast_radius/_scaled,
       - add_explosion / add_throe / add_death_fountain emitters (logged), and
         on_tank_destroyed (logged).
     `with_fountain=False` DROPS add_death_fountain so the _debris_fountain
-    fallback branch (state.add_explosion dirt-puff) is exercised."""
+    fallback branch (state.add_explosion dirt-puff) is exercised.
+    `with_queue=True` binds the STAGED surface (death_queue + throe_fx +
+    death_fountains + projectiles); the emit recorders then ALSO append live
+    entries (ttl-tagged) so step_queue's stage waits see them; without it the
+    attributes are ABSENT and death_sequence/retreat_sequence take their
+    immediate stub paths, exactly like a bare GameState stub."""
+
+    THROE_TTL = 3        # mock throe lifetime in ticks (aged by the driver)
+    FOUNTAIN_TTL = 2     # mock fountain (0x60c3 climb) lifetime in ticks
 
     def __init__(self, cfg=None, tanks=None, terrain=None, rng=None,
                  explosion_scale=1.0, current_shooter=None, current_weapon=None,
-                 w=360, with_fountain=True):
+                 w=360, h=480, with_fountain=True, with_queue=False):
         self.cfg = cfg if cfg is not None else MockCfg()
         self.tanks = tanks if tanks is not None else []
-        self.terrain = terrain if terrain is not None else MockTerrain(w=w)
+        self.terrain = terrain if terrain is not None else MockTerrain(w=w, h=h)
         self.rng = rng if rng is not None else Rng(0)
         self.explosion_scale = explosion_scale
         self.current_shooter = current_shooter
         self.current_weapon = current_weapon
         self.economy = MockEconomy()
         self.w = w
+        self.h = h
         # observable callback logs
         self.explosions = []
         self.throes = []
         self.fountains = []
         self.destroyed = []
         self._with_fountain = with_fountain
+        self._with_queue = with_queue
         if with_fountain:
             # bind the method only when requested (so hasattr is False otherwise,
             # exactly like a GameState stub lacking the emitter)
             self.add_death_fountain = self._add_death_fountain
+        if with_queue:
+            self.death_queue = []
+            self.throe_fx = []
+            self.death_fountains = []
+            self.projectiles = []
 
     def add_explosion(self, x, y, r, dirt_only=False, nuke=False):
         self.explosions.append([int(x), int(y), int(r), bool(dirt_only),
                                 bool(nuke)])
 
-    def add_throe(self, kind, x, y, color):
-        self.throes.append([kind, x, y, color])
+    def add_throe(self, kind, x, y, color, life=None):
+        self.throes.append([kind, x, y, color,
+                            life if life is not None else None])
+        if self._with_queue:
+            self.throe_fx.append({"ttl": self.THROE_TTL})
 
     def _add_death_fountain(self, x, y, top, color=15, stride=6, scatter=1):
         self.fountains.append([x, y, top, color, stride, scatter])
+        if self._with_queue:
+            self.death_fountains.append({"ttl": self.FOUNTAIN_TTL})
 
     def on_tank_destroyed(self, victim, weapon):
         self.destroyed.append([victim.id, weapon is not None])
@@ -229,6 +290,14 @@ def _state_snap(st):
     }
 
 
+def _sig_json(sig, payload):
+    """JSON-able form of a step_queue (signal, payload) tuple: the award
+    payload is the tank object -> its id; front/blast payloads are ints."""
+    if hasattr(payload, "id"):
+        return [sig, payload.id]
+    return [sig, payload]
+
+
 # ---------------------------------------------------------------------------
 # death dumper
 # ---------------------------------------------------------------------------
@@ -240,24 +309,31 @@ def dump_death():
         "module": "death",
         "consts": [],
         "blast_radius": [],
-        "throe_pick": [],
-        "spawn_throe": [],
+        "roll_throe": [],
+        "sequence_immediate": [],
+        "retreat_stub": [],
         "debris_fountain": [],
         "debris_fountain_fallback": [],
-        "final_blast": [],
-        "effect_standard": [],
-        "death_sequence": [],
+        "staged": [],
     }
 
     # -- module constants (each one expect()) --
     out["consts"].append({
         "fn": "const",
+        "THROE_FRONT_TICKS": death.THROE_FRONT_TICKS,
+        "THROE_DELAY_TICKS": death.THROE_DELAY_TICKS,
+        "RADIUS_SMALL": death.RADIUS_SMALL,
+        "RADIUS_LARGE": death.RADIUS_LARGE,
+        "RADIUS_CAP": death.RADIUS_CAP,
+        "SINK_DEPTH_MIN": death.SINK_DEPTH_MIN,
+        "SINK_DEPTH_RAND": death.SINK_DEPTH_RAND,
+        "BALL_STEP_FRAMES": death.BALL_STEP_FRAMES,
         "DEBRIS_PUFF_RADIUS": death.DEBRIS_PUFF_RADIUS,
         "DEBRIS_ROW_STRIDE": death.DEBRIS_ROW_STRIDE,
         "DEBRIS_TOP_MARGIN": death.DEBRIS_TOP_MARGIN,
         "DEATH_BLAST_FALLBACK": death.DEATH_BLAST_FALLBACK,
         "PLAYFIELD_TOP": death.PLAYFIELD_TOP,
-        "STANDARD": death.STANDARD,
+        "STATUS_BAR_H": death.STATUS_BAR_H,
     })
 
     # -----------------------------------------------------------------------
@@ -281,10 +357,7 @@ def dump_death():
             "fn": "blast_radius", "idx": -1, "name": "None", "blast": 0,
             "scale": sc, "out": death._blast_radius(st, None),
         })
-    # explosion_scale ABSENT (getattr default 1.0): a state object built without
-    # explosion_scale -- but our MockState always sets it; emulate the default by
-    # passing weapon=None on scale 1.0 (already covered) and additionally a state
-    # with explosion_scale=1.0 to lock the default-equivalent value.
+    # explosion_scale=1.0 lock for the default-equivalent value.
     out["blast_radius"].append({
         "fn": "blast_radius", "idx": -1, "name": "None_default", "blast": 0,
         "scale": 1.0, "out": death._blast_radius(MockState(explosion_scale=1.0),
@@ -292,24 +365,31 @@ def dump_death():
     })
 
     # -----------------------------------------------------------------------
-    # The rand(11) throe roulette stream itself: for each seed, the first N
-    # picks of rng.pick(11).  This is the SELECTION the death sequence consumes;
-    # asserting the raw stream pins the seeded throe choice exactly (integers).
+    # _roll_throe: the rand(11) roulette WITH the byte-decoded case-8 reroll
+    # (FUN_271b_0005 offsets 00f4..010a).  For each seed, 40 sequential rolls
+    # with SUSPEND_DIRT 0 (raw stream, 8 permitted) and 35 (nonzero -> every 8
+    # rerolled away, consuming extra stream picks).  Pins the seeded selection
+    # AND the reroll's stream-position effect exactly (integers).
     # -----------------------------------------------------------------------
     SEEDS = [0, 1, 2, 3, 7, 11, 42, 99, 123, 1234, 2024, 65535, 0xDEADBEEF,
              123456789]
     for s in SEEDS:
-        r = Rng(s)
-        picks = [r.pick(11) for _ in range(60)]
-        out["throe_pick"].append({"fn": "throe_pick", "seed": s, "out": picks})
+        for suspend in (0, 35):
+            st = MockState(cfg=MockCfg(suspend_dirt=suspend), rng=Rng(s))
+            rolls = [death._roll_throe(st) for _ in range(40)]
+            out["roll_throe"].append({"fn": "roll_throe", "seed": s,
+                                      "suspend": suspend, "out": rolls})
 
     # -----------------------------------------------------------------------
-    # _spawn_throe: drive EVERY throe value 0..10 over several radii / tank
-    # positions / colors, snapshotting the explosion + throe-emitter logs.  Pins
-    # case 3 (triple, max(4, r-5) radius), case 4 (r+8 ball), 5-10 (named
-    # throes), and 0/1/2 (no flourish).
+    # death_sequence STUB path (no death_queue): _roll_throe +
+    # _case_body_immediate in one tick.  Drive EVERY roll 0..10 via the
+    # _ForcedPicks first-pick script over the tank grid x scale, with bystanders
+    # at known integer distances so the case-1..3 escalating blasts (radii
+    # RADIUS_* x scale) and their chain kills (kill_tank -> on_tank_destroyed
+    # log; NO award in kill_tank now) pin exactly.  Cases 4..10 are visual-only
+    # (byte-decoded): the bystander snapshots pin that NOBODY takes damage.
+    # o2 is pre-dead: the blast damage loop must skip it.
     # -----------------------------------------------------------------------
-    THROE_RADII = [0, 1, 3, 4, 5, 6, 9, 10, 18, 20, 40, 75]
     THROE_TANKS = [
         ("origin", 0, 0, 0),
         ("mid", 200, 300, 7),
@@ -317,35 +397,93 @@ def dump_death():
         ("big", 355, 470, 15),
         ("c2", 123, 88, 2),
     ]
-    for throe in range(11):
+    for roll in range(11):
         for (tname, tx, ty, tcol) in THROE_TANKS:
-            for radius in THROE_RADII:
-                st = MockState()
-                tk = MockTank("t", x=tx, y=ty, color=tcol)
-                death._spawn_throe(st, tk, throe, radius)
-                out["spawn_throe"].append({
-                    "fn": "spawn_throe", "throe": throe, "tank": tname,
-                    "x": tx, "y": ty, "col": tcol, "radius": radius,
-                    "explosions": list(st.explosions),
-                    "throes": list(st.throes),
+            for sc in (1.0, 2.0):
+                # roll 10 armed so the immediate cook-off branch fires (the
+                # ammo-less predicate-False side is pinned by roll10_noammo in
+                # the staged battery).
+                ammo = 2 if roll == 10 else 0
+                victim = MockTank("v", x=tx, y=ty, color=tcol, team_id=2,
+                                  player_index=0, health=0, alive=False,
+                                  ammo=ammo)
+                o1 = MockTank("o1", x=tx + 6, y=ty, team_id=2, player_index=1,
+                              health=100)
+                o2 = MockTank("o2", x=tx + 9, y=ty, team_id=2, player_index=2,
+                              health=0, alive=False)
+                o3 = MockTank("o3", x=tx + 150, y=ty, team_id=2,
+                              player_index=3, health=100)
+                shooter = MockTank("s", x=tx - 100, y=ty, team_id=1,
+                                   player_index=5)
+                st = MockState(tanks=[victim, o1, o2, o3],
+                               rng=_ForcedPicks(Rng(1000 + roll), [roll]),
+                               explosion_scale=sc, current_shooter=shooter)
+                ret = death.death_sequence(st, victim, None)
+                out["sequence_immediate"].append({
+                    "fn": "sequence_immediate", "roll": roll, "tank": tname,
+                    "x": tx, "y": ty, "col": tcol, "scale": sc,
+                    "ammo": ammo,
+                    "ret": ret,
+                    "victim": _tank_snap(victim), "o1": _tank_snap(o1),
+                    "o2": _tank_snap(o2), "o3": _tank_snap(o3),
+                    "shooter": _tank_snap(shooter),
+                    "state": _state_snap(st),
                 })
 
     # -----------------------------------------------------------------------
+    # retreat_sequence STUB path (no death_queue): fountain (or its fallback
+    # puff) + the weapon-radius grave blast, immediately.  weapon x scale x
+    # ICON_BAR (top clip 29 vs 9) x fountain-emitter presence.  current_shooter
+    # is None (game.retreat nulls it), so blast kills award no one.
+    # -----------------------------------------------------------------------
+    RETREAT_WEAPONS = [None, 0, 1, 3]
+    for widx in RETREAT_WEAPONS:
+        for sc in (1.0, 2.0):
+            for icon_bar in (False, True):
+                for with_fountain in (True, False):
+                    weapon = weapons.ITEMS[widx] if widx is not None else None
+                    victim = MockTank("v", x=200, y=300, color=7, team_id=2,
+                                      player_index=0, health=0, alive=False)
+                    o1 = MockTank("o1", x=206, y=300, team_id=2,
+                                  player_index=1, health=100)
+                    o3 = MockTank("o3", x=20, y=300, team_id=2,
+                                  player_index=3, health=100)
+                    st = MockState(cfg=MockCfg(icon_bar=icon_bar),
+                                   tanks=[victim, o1, o3], rng=Rng(3),
+                                   explosion_scale=sc, current_shooter=None,
+                                   with_fountain=with_fountain)
+                    death.retreat_sequence(st, victim, weapon)
+                    out["retreat_stub"].append({
+                        "fn": "retreat_stub",
+                        "widx": (widx if widx is not None else -1),
+                        "wname": (weapon.name if weapon else "None"),
+                        "scale": sc, "icon_bar": icon_bar,
+                        "with_fountain": with_fountain,
+                        "victim": _tank_snap(victim), "o1": _tank_snap(o1),
+                        "o3": _tank_snap(o3),
+                        "state": _state_snap(st),
+                    })
+
+    # -----------------------------------------------------------------------
     # _debris_fountain WITH the emitter present: the add_death_fountain call
-    # args (x, y, top, color, stride, scatter) over scatter False/True and
-    # several tank positions / colors.  `top` is the constant ef40-7 analogue.
+    # args (x, y, top, color, stride, scatter) over scatter False/True, the
+    # tank grid, and ICON_BAR OFF/ON (top = PLAYFIELD_TOP+7 = 9 vs
+    # STATUS_BAR_H+7 = 29, the bar-bottom ceiling analogue).
     # -----------------------------------------------------------------------
     for (tname, tx, ty, tcol) in THROE_TANKS:
         for scatter in (False, True):
-            st = MockState(with_fountain=True)
-            tk = MockTank("t", x=tx, y=ty, color=tcol)
-            death._debris_fountain(st, tk, scatter=scatter)
-            out["debris_fountain"].append({
-                "fn": "debris_fountain", "tank": tname, "x": tx, "y": ty,
-                "col": tcol, "scatter": bool(scatter),
-                "fountains": list(st.fountains),
-                "explosions": list(st.explosions),
-            })
+            for icon_bar in (False, True):
+                st = MockState(cfg=MockCfg(icon_bar=icon_bar),
+                               with_fountain=True)
+                tk = MockTank("t", x=tx, y=ty, color=tcol)
+                death._debris_fountain(st, tk, scatter=scatter)
+                out["debris_fountain"].append({
+                    "fn": "debris_fountain", "tank": tname, "x": tx, "y": ty,
+                    "col": tcol, "scatter": bool(scatter),
+                    "icon_bar": icon_bar,
+                    "fountains": list(st.fountains),
+                    "explosions": list(st.explosions),
+                })
 
     # -----------------------------------------------------------------------
     # _debris_fountain FALLBACK (no add_death_fountain): the dirt-puff
@@ -364,154 +502,110 @@ def dump_death():
             })
 
     # -----------------------------------------------------------------------
-    # _final_blast: damage.explode at the tank center over several radii, with a
-    # battery of tanks at known integer distances so the linear (R-d)*100/R law
-    # (round-half-to-even) + kills + scoring all exercise.  The dying tank is
-    # placed alive here so the blast at its own center kills it (the re-entrant
-    # path the real game produces, since kill_tank already cleared alive before
-    # on_tank_destroyed -- both alive and pre-dead variants are covered in
-    # death_sequence below).
+    # STAGED step_queue battery: a queue-capable mock driven tick-by-tick.
+    # Each tick = (1) age the mock FX/flight lists (throe ttl 3, fountain ttl
+    # 2, projectile drains 2 ticks after spawn -- the driver's stand-ins for
+    # game's emitter stepping), (2) death.step_queue, (3) record the (signal,
+    # payload) stream + the per-tick list lengths.  Cases: every forced roll
+    # 0..10 (the full roulette: front lead-in cases 0-5, blast ladders +
+    # THROE_DELAY_TICKS waits, ball/fireworks/ring waits, the sink descent
+    # ticks + y clamp, the debris cook-off), the cook-off WITHOUT ammo (skips
+    # straight to done), a two-corpse CHAIN (FIFO order: the second corpse's
+    # award fires only after the first throe retires), an injected mock FLIGHT
+    # (a live projectile BLOCKS the queue until it drains -- no roulette case
+    # spawns one, so the driver injects it), and the retreat ASCENSION (climb
+    # wait -> grave blast).  The dump FAILS if a case does not drain (queue
+    # stuck = port bug; no silent truncation).
     # -----------------------------------------------------------------------
-    for radius in (10, 18, 20, 40):
-        # tanks spread at integer x-offsets so d is exact-integer-grid
-        victim = MockTank("v", x=200, y=300, color=7, team_id=2,
-                          player_index=0, health=100)
-        n1 = MockTank("n1", x=205, y=300, team_id=2, player_index=1,
+    def run_staged(label, seed, forced, victims, ascend=None, ammo=0,
+                   selected=2, y1=300, hold_flight=False):
+        v1 = MockTank("v1", x=200, y=y1, color=7, team_id=2, player_index=0,
+                      health=0, alive=False,
+                      selected_weapon=selected, ammo=ammo)
+        o1 = MockTank("o1", x=206, y=300, team_id=2, player_index=1,
                       health=100)
-        n2 = MockTank("n2", x=215, y=300, team_id=2, player_index=2,
-                      health=100)
-        n3 = MockTank("n3", x=200, y=312, team_id=2, player_index=3,
-                      health=100, shield_hp=40, shield_item=1)
-        far = MockTank("far", x=20, y=300, team_id=2, player_index=4,
-                       health=100)
-        shooter = MockTank("s", x=100, y=300, team_id=1, player_index=5)
-        st = MockState(tanks=[victim, n1, n2, n3, far], rng=Rng(1),
-                       explosion_scale=1.0, current_shooter=shooter)
-        death._final_blast(st, victim, radius)
-        out["final_blast"].append({
-            "fn": "final_blast", "radius": radius,
-            "victim": _tank_snap(victim), "n1": _tank_snap(n1),
-            "n2": _tank_snap(n2), "n3": _tank_snap(n3), "far": _tank_snap(far),
+        o2 = MockTank("o2", x=215, y=300, team_id=2, player_index=2,
+                      health=0, alive=False)
+        tanks = [v1, o1, o2]
+        v2 = None
+        if victims > 1:
+            v2 = MockTank("v2", x=100, y=280, color=4, team_id=2,
+                          player_index=4, health=0, alive=False)
+            tanks.append(v2)
+        shooter = MockTank("s", x=50, y=300, team_id=1, player_index=5)
+        st = MockState(tanks=tanks, rng=_ForcedPicks(Rng(seed), forced),
+                       explosion_scale=1.0, current_shooter=shooter,
+                       with_queue=True)
+        if ascend is not None:
+            death.retreat_sequence(st, v1, ascend if ascend is not True else None)
+        else:
+            death.death_sequence(st, v1, None)
+            if v2 is not None:
+                death.death_sequence(st, v2, None)
+        if hold_flight:
+            # no roulette case spawns a flight (byte-verified), so inject one:
+            # the killing shot still airborne when a settle-path kill enqueued.
+            st.projectiles.append({"mock": True})
+        ticks = []
+        proj_countdown = None
+        for _ in range(200):
+            # (1) age the mock lists (the driver's _animate_effects stand-in)
+            for e in st.throe_fx:
+                e["ttl"] -= 1
+            st.throe_fx[:] = [e for e in st.throe_fx if e["ttl"] > 0]
+            for e in st.death_fountains:
+                e["ttl"] -= 1
+            st.death_fountains[:] = [e for e in st.death_fountains
+                                     if e["ttl"] > 0]
+            if st.projectiles:
+                if proj_countdown is None:
+                    proj_countdown = 2
+                else:
+                    proj_countdown -= 1
+                    if proj_countdown <= 0:
+                        st.projectiles[:] = []
+                        proj_countdown = None
+            # (2) advance the staged FIFO
+            sigs = death.step_queue(st)
+            # (3) record
+            ticks.append({
+                "sig": [_sig_json(s, p) for (s, p) in sigs],
+                "q": len(st.death_queue),
+                "throe": len(st.throe_fx),
+                "fount": len(st.death_fountains),
+                "proj": len(st.projectiles),
+            })
+            if (not st.death_queue and not st.throe_fx
+                    and not st.death_fountains and not st.projectiles):
+                break
+        else:
+            raise AssertionError(f"staged case {label!r} did not drain")
+        out["staged"].append({
+            "fn": "staged", "case": label, "seed": seed,
+            "forced": list(forced), "victims": victims,
+            "ammo": ammo, "selected": selected,
+            "hold_flight": bool(hold_flight),
+            "ascension": bool(ascend is not None),
+            "n_ticks": len(ticks),
+            "ticks": ticks,
+            "v1": _tank_snap(v1), "v1_y": v1.y,
+            "o1": _tank_snap(o1), "o2": _tank_snap(o2),
+            "v2": (_tank_snap(v2) if v2 is not None else None),
             "shooter": _tank_snap(shooter),
             "state": _state_snap(st),
         })
 
-    # -----------------------------------------------------------------------
-    # _effect_standard: the byte-confirmed (no-throe) effect = fountain + blast.
-    # Snapshot the full ordered logs over a couple radii.
-    # -----------------------------------------------------------------------
-    for radius in (18, 20):
-        for with_fountain in (True, False):
-            victim = MockTank("v", x=200, y=300, color=5, team_id=2,
-                              player_index=0, health=100)
-            shooter = MockTank("s", x=100, y=300, team_id=1, player_index=5)
-            st = MockState(tanks=[victim], rng=Rng(2), explosion_scale=1.0,
-                           current_shooter=shooter, with_fountain=with_fountain)
-            death._effect_standard(st, victim, radius)
-            out["effect_standard"].append({
-                "fn": "effect_standard", "radius": radius,
-                "with_fountain": with_fountain,
-                "victim": _tank_snap(victim),
-                "state": _state_snap(st),
-            })
-
-    # -----------------------------------------------------------------------
-    # death_sequence: the full public entry point.  Cover the cross product of:
-    #   - many fixed seeds (the throe roulette picks 0..10 across them),
-    #   - weapon = a representative item (drives the weapon-scaled radius) AND
-    #     weapon = None (the fallback radius 18*scale),
-    #   - explosion_scale in {1.0, 2.0},
-    #   - the dying tank ALIVE (re-entrant self-kill via the blast) AND pre-dead
-    #     (alive=False, the real kill_tank call convention),
-    #   - bystanders at known integer distances (killed / damaged / untouched),
-    #   - with and without the fountain emitter.
-    # Snapshot the returned throe + every tank post-state + the full logs.
-    # -----------------------------------------------------------------------
-    DS_SEEDS = [0, 1, 2, 3, 7, 11, 42, 99, 1234, 2024, 65535]
-    # weapon indices spanning small/large blast: Baby Missile(10), Missile(20),
-    # Baby Nuke(40), Nuke(75), and None (fallback).
-    DS_WEAPONS = [0, 1, 2, 3, None]
-    for seed in DS_SEEDS:
-        for widx in DS_WEAPONS:
-            for sc in (1.0, 2.0):
-                for victim_alive in (True, False):
-                    for with_fountain in (True, False):
-                        weapon = (weapons.ITEMS[widx]
-                                  if widx is not None else None)
-                        victim = MockTank("v", x=200, y=300, color=7,
-                                          team_id=2, player_index=0,
-                                          health=100, alive=victim_alive)
-                        # a near bystander (takes partial/lethal damage), a
-                        # shielded mid bystander, and a far untouched tank
-                        near = MockTank("near", x=206, y=300, team_id=2,
-                                        player_index=1, health=100)
-                        shielded = MockTank("shield", x=200, y=314, team_id=2,
-                                            player_index=2, health=100,
-                                            shield_hp=60, shield_item=1)
-                        far = MockTank("far", x=20, y=300, team_id=2,
-                                       player_index=3, health=100)
-                        shooter = MockTank("s", x=100, y=300, team_id=1,
-                                           player_index=5)
-                        st = MockState(
-                            tanks=[victim, near, shielded, far],
-                            rng=Rng(seed), explosion_scale=sc,
-                            current_shooter=shooter,
-                            with_fountain=with_fountain)
-                        throe = death.death_sequence(st, victim, weapon)
-                        out["death_sequence"].append({
-                            "fn": "death_sequence", "seed": seed,
-                            "widx": (widx if widx is not None else -1),
-                            "wname": (weapon.name if weapon else "None"),
-                            "scale": sc, "victim_alive": victim_alive,
-                            "with_fountain": with_fountain,
-                            "throe": throe,
-                            "victim": _tank_snap(victim),
-                            "near": _tank_snap(near),
-                            "shielded": _tank_snap(shielded),
-                            "far": _tank_snap(far),
-                            "shooter": _tank_snap(shooter),
-                            "state": _state_snap(st),
-                        })
-
-    # death_sequence with NO shooter (current_shooter None): the blast deals
-    # damage with no hit-counters and no kill award (award_kill returns early on
-    # killer None).  Pins the no-attacker branch.
-    for seed in (0, 5, 42):
-        victim = MockTank("v", x=200, y=300, color=4, team_id=0,
-                          player_index=0, health=100, alive=True)
-        near = MockTank("near", x=204, y=300, team_id=0, player_index=1,
-                        health=100)
-        st = MockState(tanks=[victim, near], rng=Rng(seed),
-                       explosion_scale=1.0, current_shooter=None)
-        throe = death.death_sequence(st, victim, weapons.ITEMS[1])
-        out["death_sequence"].append({
-            "fn": "death_sequence", "seed": seed, "widx": 1,
-            "wname": "Missile_noshooter", "scale": 1.0, "victim_alive": True,
-            "with_fountain": True, "throe": throe,
-            "victim": _tank_snap(victim), "near": _tank_snap(near),
-            "shielded": _tank_snap(near), "far": _tank_snap(near),
-            "shooter": [0, 0, 0, False, 0, 0, 0],
-            "state": _state_snap(st),
-        })
-
-    # death_sequence: empty-tank-list state (no tanks at all) -- the blast loop
-    # iterates nothing; only the throe/fountain/carve/add_explosion fire.  Pins
-    # the degenerate no-target case over the seeds that pick each throe family.
-    for seed in (0, 1, 2, 42):
-        victim = MockTank("v", x=180, y=260, color=11, alive=False)
-        st = MockState(tanks=[], rng=Rng(seed), explosion_scale=1.0)
-        throe = death.death_sequence(st, victim, weapons.ITEMS[0])
-        out["death_sequence"].append({
-            "fn": "death_sequence", "seed": seed, "widx": 0,
-            "wname": "BabyMissile_notanks", "scale": 1.0, "victim_alive": False,
-            "with_fountain": True, "throe": throe,
-            "victim": _tank_snap(victim),
-            "near": [0, 0, 0, False, 0, 0, 0],
-            "shielded": [0, 0, 0, False, 0, 0, 0],
-            "far": [0, 0, 0, False, 0, 0, 0],
-            "shooter": [0, 0, 0, False, 0, 0, 0],
-            "state": _state_snap(st),
-        })
+    for roll in range(11):
+        # roll 10 with ammo so the cook-off actually fires
+        run_staged(f"roll{roll}", 5, [roll], 1,
+                   ammo=(2 if roll == 10 else 0))
+    run_staged("roll10_noammo", 5, [10], 1, ammo=0)
+    # sink next to the floor: the y descent clamps at state.h - 1 (479)
+    run_staged("roll8_deep", 5, [8], 1, y1=470)
+    run_staged("chain_cookoff", 9, [10, 6], 2, ammo=2)
+    run_staged("chain_front", 11, [0, 9], 2)
+    run_staged("flight_hold", 13, [9], 1, hold_flight=True)
+    run_staged("ascension", 7, [], 1, ascend=True)
 
     return _write("death", out)
 

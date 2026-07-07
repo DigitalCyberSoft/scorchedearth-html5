@@ -427,15 +427,13 @@ describe("game_flow: death sequence (on_tank_destroyed populates FINITE FX)", ()
         damage.explode(gs as unknown as damage.State, gs.tanks[1].x, gs.tanks[1].y, 80, true),
       ).not.toThrow();
       steps.push(snap(gs, "after_kill"));
-      // the death FX MUST be populated with finite numbers (the regression guard).
+      // The killing blast's own fireball is immediate; the DEATH FX are STAGED
+      // (death.step_queue: the FUN_271b_0005 kill roulette -- award/front/case
+      // body -- runs when the queue PROCESSES the corpse), so nothing death-
+      // side exists at the kill snapshot beyond the queue entry itself.
       const ak = steps[steps.length - 1];
-      expect(ak.fx.death_fountains.length, "fountains populated").toBeGreaterThan(0);
-      for (const f of ak.fx.death_fountains) {
-        for (const v of [f.col, f.y, f.top, f.color, f.stride, f.scatter]) {
-          expect(Number.isInteger(v)).toBe(true);
-        }
-      }
       expect(ak.fx.explosions.length, "explosions populated").toBeGreaterThan(0);
+      expect(gs.death_queue.length, "death staged").toBeGreaterThan(0);
       for (let k = 0; k < 6; k++) {
         gs._animate_effects();
         steps.push(snap(gs, `anim${k}`));
@@ -444,6 +442,37 @@ describe("game_flow: death sequence (on_tank_destroyed populates FINITE FX)", ()
       for (let i = 0; i < c.steps.length; i++) {
         expectSnap(steps[i], c.steps[i], `death[${c.seed}][${i}]`);
       }
+      // The NaN regression guard (the death-fountain options-object bug), kept
+      // under the DECODED model: a normal kill no longer spawns the ascension
+      // fountain (that is the retreat path, FUN_3ef5_029a); the kill roulette
+      // may spawn any throe kind -- or none at all (thud/blast/vanish rolls).
+      // Drive the staged queue to COMPLETION, stepping any cook-off flight
+      // (roll 10 launches the corpse's weapon, and a live projectile blocks
+      // the queue), and assert (a) every fountain/throe field that DID appear
+      // is a finite integer and (b) the queue fully drains.
+      let guard = 0;
+      while (
+        (gs.death_queue.length > 0 ||
+          gs.throe_fx.length > 0 ||
+          gs.death_fountains.length > 0 ||
+          gs.projectiles.length > 0) &&
+        guard++ < 3000
+      ) {
+        for (let s = 0; s < C.PHYSICS_SUBSTEPS; s++) gs._step_flight();
+        gs._animate_effects();
+        for (const f of gs.death_fountains as Array<{ [k: string]: unknown }>) {
+          for (const v of [f.col, f.y, f.top, f.color, f.stride, f.scatter]) {
+            expect(Number.isInteger(v), "fountain field integer").toBe(true);
+          }
+        }
+        for (const e of gs.throe_fx as Array<{ [k: string]: unknown }>) {
+          for (const v of [e.x, e.y, e.color, e.frame, e.life]) {
+            expect(Number.isInteger(v), "throe field integer").toBe(true);
+          }
+        }
+      }
+      expect(gs.death_queue.length, "death queue drains").toBe(0);
+      expect(gs.throe_fx.length, "throes retire").toBe(0);
     });
   }
 });
@@ -500,10 +529,20 @@ describe("game_flow: retreat that ends the round (last tank standing)", () => {
       const steps: Snap[] = [snap(gs, "turn_start")];
       gs.retreat();
       steps.push(snap(gs, "after_retreat"));
-      expect(gs.phase, `retreat_win#${ci} ends round`).toBe("round_end");
+      // Round end is DEFERRED past the staged death FX: retreat parks in SETTLE
+      // (the staged grave blast must land first -- it can damage neighbours),
+      // and the SETTLE exit runs the same win check afterwards.
+      expect(gs.phase, `retreat_win#${ci} defers to settle`).toBe("settle");
       for (let i = 0; i < c.steps.length; i++) {
         expectSnap(steps[i], c.steps[i], `retreat_win[${c.seed}][${i}]`);
       }
+      // ...and the round DOES end once the staged FX drain (the original
+      // guarantee of this test, now at its faithful time).
+      let guard = 0;
+      while (gs.phase === "settle" && guard++ < 2000) {
+        gs.update(DT);
+      }
+      expect(gs.phase, `retreat_win#${ci} ends round after drain`).toBe("round_end");
     });
   }
 });
@@ -1490,6 +1529,28 @@ describe("game_flow: coverage edge branches (differential)", () => {
     expect(gs.round_index).toBe(E.sim_update_win.round_index);
   });
 
+  it("_sim_update ends the round only after the death queue drains (decoded model)", () => {
+    // Decoded-model twin of the win short-circuit above: a SIM kill now STAGES
+    // its roulette throe (death_queue), and the win check is queue-guarded so
+    // any pending grave blast (cases 1-3) lands before the round ends -- the
+    // binary's blocking sweep order.  TS-only phase-machine check (the vector
+    // above pins the deferred FALSE branch; this drives the drain to the TRUE
+    // branch).
+    const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS", SCORING: "STANDARD" }), 1, AI2);
+    gs.new_game();
+    damage.kill_tank(gs as unknown as damage.State, gs.tanks[1] as unknown as damage.Tank);
+    gs._sim_update(DT);
+    expect(gs.phase, "held while the throe plays").toBe("sim_live");
+    let drained = -1;
+    for (let i = 0; i < 60 * 60 && gs.phase === "sim_live"; i++) {
+      gs._sim_update(DT);
+      if (drained < 0 && gs.death_queue.length === 0 && gs.throe_fx.length === 0) drained = i;
+    }
+    expect(gs.death_queue.length, "queue drained").toBe(0);
+    expect(gs.phase, "round ends after the drain").toBe("round_end");
+    expect(drained, "the end came from the drain, not a stall").toBeGreaterThanOrEqual(0);
+  });
+
   it("_sim_update skips a tank with no _sim record (1279-1280)", () => {
     const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0, PLAY_MODE: "SIMULTANEOUS" }), 1, AI2);
     gs.new_game();
@@ -1706,7 +1767,13 @@ describe("game_flow: edge guards", () => {
     expect((gs.speech as unknown as { text: string }).text).toBe("ZAP!");
   });
 
-  it("on_tank_destroyed parks a die-taunt bubble when the talk pool is populated (2358-2362)", () => {
+  it("kill parks a die-taunt bubble at roulette processing time (2124-2129 -> award signal, 1834-1841)", () => {
+    // Decoded-model update (notes_death_throe_roulette.md s.2.1): the die taunt
+    // no longer parks synchronously inside on_tank_destroyed -- that call now
+    // ONLY enqueues the corpse; award + taunt fire when the staged death queue
+    // PROCESSES it (the ("award", tank) signal in _step_death_queue), the
+    // binary's dead-tank-sweep order.  Same guarantee (pool line -> speech
+    // bubble), moved to processing time; driven here by update ticks.
     const gs = build(makeCfg({ MAXROUNDS: 10, INITIAL_CASH: 0, MAX_WIND: 0 }), 1, [["A", C.AI_HUMAN, 0, 0], ["B", C.AI_HUMAN, 0, 0]]);
     gs.new_game();
     gs.talk = new TalkConfig(["ZAP!"], ["URK!"], {
@@ -1714,8 +1781,15 @@ describe("game_flow: edge guards", () => {
       ATTACK_COMMENTS: "", DIE_COMMENTS: "",
     });
     gs.speech = null;
+    gs.tanks[1].health = 0;
+    gs.tanks[1].alive = false;
+    gs.phase = "firing"; // the queue steps in FIRING/SETTLE/SYNC/SIM, not AIM
     gs.on_tank_destroyed(gs.tanks[1], null);
-    expect(gs.speech, "die taunt parked").not.toBeNull();
+    expect(gs.speech, "no taunt at enqueue time (processing-time model)").toBeNull();
+    for (let i = 0; i < 600 && gs.speech === null; i++) {
+      gs.update(DT);
+    }
+    expect(gs.speech, "die taunt parked at processing").not.toBeNull();
     expect((gs.speech as unknown as { text: string }).text).toBe("URK!");
   });
 

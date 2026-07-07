@@ -247,6 +247,28 @@ def dump_sound():
     events["death"] = {"kind": "seq", "tones": [list(t) for t in death],
                        "plane": _left(sfx._seq_array(tuple(death)))}
 
+    # throe_front: 40 rising blips 1000 Hz += 200 wrapping past 4000 back to
+    # 1000 (FUN_271b_03b5, the kill-roulette lead-in for cases 0-5)
+    tf = []
+    f = 1000
+    for _ in range(40):
+        tf.append((f, 12))
+        f += 200
+        if f > 4000:
+            f = 1000
+    events["throe_front"] = {"kind": "seq", "tones": [list(t) for t in tf],
+                             "plane": _left(sfx._seq_array(tuple(tf)))}
+
+    # throe_thud: a single 100 Hz thud (roulette case 0, 5571:0007(0x64,0xa))
+    tt = [(100, 90)]
+    events["throe_thud"] = {"kind": "seq", "tones": [list(t) for t in tt],
+                            "plane": _left(sfx._seq_array(tuple(tt)))}
+
+    # sink: falling _sweep_steps(5000,-200,24,10) (roulette case 8, FUN_352c_00c9)
+    sk = sfx._sweep_steps(5000, -200, 24, 10)
+    events["sink"] = {"kind": "seq", "tones": [list(t) for t in sk],
+                      "plane": _left(sfx._seq_array(tuple(sk)))}
+
     # battery (FUN_3a16_0f44.c:17-21)
     battery = [(100, 22), (200, 28), (100, 34)]
     events["battery"] = {"kind": "seq", "tones": [list(t) for t in battery],

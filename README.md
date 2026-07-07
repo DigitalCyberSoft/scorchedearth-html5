@@ -47,10 +47,10 @@ This is not a fresh interpretation - it is a *verified reimplementation*:
 
 The verification:
 
-- **15,064 differential tests** (`npm test`, vitest) assert the TypeScript reproduces
+- **15,705 differential tests** (`npm test`, vitest) assert the TypeScript reproduces
   the Python port's output **exactly** (integers, pixels, bytes) or within a tight
   epsilon (transcendental math only). The RNG reproduces CPython's Mersenne Twister
-  bit-for-bit; the game engine is checked by 25,814 turn/round state snapshots; the
+  bit-for-bit; the game engine is checked by 29,814 turn/round state snapshots; the
   sprites by ~8M pixel assertions.
 - A **visual regression gate** (`visual/`, `bash visual/run_gate.sh`) renders identical
   seeded game states through both the TypeScript Canvas renderer and the Python pygame
@@ -80,7 +80,7 @@ ships above; players never run any of this. It is only for modifying the code.
 npm install
 npm run dev          # dev server at http://localhost:5173
 npm run build        # static bundle into dist/ (what GitHub Pages serves)
-npm test             # the 15,064 differential tests against the Python oracle
+npm test             # the 15,705 differential tests against the Python oracle
 ```
 
 ## The original assets

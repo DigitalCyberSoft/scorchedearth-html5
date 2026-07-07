@@ -293,6 +293,9 @@ describe("sound: play() event branches build the oracle-exact buffer", () => {
     ["shield_collapse", "shield_collapse"],
     ["shield_deploy", "shield_deploy"],
     ["death", "death"],
+    ["throe_front", "throe_front"], // kill-roulette lead-in (FUN_271b_03b5)
+    ["throe_thud", "throe_thud"], // roulette case 0 thud
+    ["sink", "sink"], // roulette case 8 falling sweep
     ["battery", "battery"],
     ["dirt_settle", "dirt_settle"],
     ["teleport", "teleport"],

@@ -498,6 +498,35 @@ export class Sfx {
       return this.beep(900, 40, gate);
     }
 
+    if (event === "throe_front") {
+      // FUN_271b_03b5 (file 0x1df65): 40 loop ticks, tone starts 1000 Hz,
+      // += 200 per tick, wrapping to 1000 past 4000 (0xfa0) -- the kill
+      // roulette's rising lead-in for cases 0-5.  FACT freqs/steps/count
+      // (notes_death_throe_roulette.md s.2.3); ms per blip RECON.
+      const seq: Tone[] = [];
+      let f = 1000;
+      for (let i = 0; i < 40; i++) {
+        seq.push([f, 12]);
+        f += 200;
+        if (f > 4000) {
+          f = 1000;
+        }
+      }
+      return this._play_tones(seq, gate);
+    }
+
+    if (event === "throe_thud") {
+      // Roulette case 0 (file 0x1dcce): 5571:0007(0x64, 0xa) -- a single
+      // 100 Hz thud.  FACT freq; RECON ms.
+      return this._play_tones([[100, 90]], gate);
+    }
+
+    if (event === "sink") {
+      // Roulette case 8, FUN_352c_00c9: falling tones 5000 -> 300 Hz while
+      // the corpse sinks.  FACT endpoints; step/ms RECON.
+      return this._play_tones(this._sweep_steps(5000, -200, 24, 10), gate);
+    }
+
     if (event === "death") {
       // FUN_3ef5_029a.c:54-77 -- 20 Hz rumble: 0007(0x14,0) repeated with a
       // growing 9af6 delay, plus debris ticks at 0007(0x14,0).  FACT (20 Hz).

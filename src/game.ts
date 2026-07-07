@@ -211,6 +211,7 @@ export class GameState {
   plasma_rings: Array<{ [k: string]: number }>;
   death_fountains: Array<{ [k: string]: number }>;
   throe_fx: Array<{ [k: string]: unknown }>;
+  death_queue: death.DeathEntry[];
   flashes: Array<{ [k: string]: unknown }>;
   shield_fades: { [playerIndex: number]: { dir: number; frame: number } };
   _prev_shield_hp: { [playerIndex: number]: number };
@@ -224,6 +225,7 @@ export class GameState {
   _digger_cycle: number;
   _digger_step: number;
   _explo_band_active: boolean;
+  _death_pulse: { color: number; frame: number } | null;
   firewalls: Array<{ [k: string]: number }>;
   _firewall_counter: number;
   _firewall_band_active: boolean;
@@ -287,6 +289,10 @@ export class GameState {
     this.plasma_rings = []; // plasma grow->shrink rings (FUN_3f76_03bd)
     this.death_fountains = []; // rising tank-death debris (FUN_3ef5_029a:60-77)
     this.throe_fx = []; // death-throe animations (FUN_271b_0005 roulette, #21)
+    // Staged tank-death FX (death.step_queue): FIFO of pending death sequences,
+    // each played throe -> climb -> grave blast, ONE at a time -- the
+    // frame-driven analogue of the binary's blocking FUN_3ef5_029a call.
+    this.death_queue = [];
     this.flashes = []; // full-screen palette flashes (lightning)
     // 51-frame status-bar shield SWATCH fade (FUN_4191_0034 collapse / _0455
     // activate): {player_index: {"dir": +1 arm-in / -1 collapse-out, "frame"}}.
@@ -317,6 +323,7 @@ export class GameState {
     this._digger_cycle = 0; // frames left of trail cycle
     this._digger_step = 0; // accumulated trail rotation
     this._explo_band_active = false; // red ramp currently loaded?
+    this._death_pulse = null; // 40-tick victim-colour flash (271b:03b5)
     this.firewalls = []; // active flame walls
     this._firewall_counter = 0; // DAT_5f38_00ec analog
     this._firewall_band_active = false; // firewall ramp loaded?
@@ -433,6 +440,8 @@ export class GameState {
     this.plasma_rings.length = 0;
     this.death_fountains.length = 0;
     this.throe_fx.length = 0;
+    this.death_queue.length = 0;
+    this._death_pulse = null;
     this.flashes.length = 0;
     this.trace_marks.length = 0;
     this.shield_fades = {};
@@ -792,17 +801,25 @@ export class GameState {
     if (t === null || !t.alive) {
       return false;
     }
-    // deny the enemy the kill: no attacker is current when the tank is removed
+    // The binary's retreat runs the ASCENSION sequence (FUN_3ef5_029a), NOT
+    // the kill roulette: the tank leaves with the rising 0x60c3 figure and
+    // its grave blast, gets NO kill award and NO throe (its in-play flag is
+    // cleared at 029a:53 before the sweep at :98).  The retreat cleanup also
+    // zeroes the current firer (FUN_33a1_0e84.c:18-19), so collateral kills
+    // of the ascension blast award to NO ONE -- mirrored by nulling
+    // current_shooter before the staged blast lands.
     this.current_shooter = null;
-    damage.kill_tank(this as unknown as damage.State, t as unknown as damage.Tank); // alive=False + death/explosion; 0 pts
-    // advance the round (SEQUENTIAL only; the live loops advance on their own clock)
+    t.alive = false;
+    t.health = 0;
+    death.retreat_sequence(this as unknown as death.DState, t as unknown as death.DTank);
+    // advance the round (SEQUENTIAL only; the live loops advance on their own clock).
+    // No immediate win check: the staged death FX (death_queue) must play out and
+    // the grave blast must LAND (it can damage/kill neighbours) first, exactly as
+    // the binary's blocking FUN_3ef5_029a completes before its caller continues.
+    // SETTLE holds while the queue drains, then its exit runs the same check.
     if (this.cfg.play_mode === C.PLAYMODE_SEQUENTIAL) {
-      if (this._win_check()) {
-        this._end_round();
-      } else {
-        this.awaiting_human = false;
-        this.phase = SETTLE;
-      }
+      this.awaiting_human = false;
+      this.phase = SETTLE;
     }
     return true;
   }
@@ -1018,13 +1035,31 @@ export class GameState {
         this.beams.length === 0 &&
         this.plasma_rings.length === 0 &&
         this.death_fountains.length === 0 &&
-        this.throe_fx.length === 0
+        this.throe_fx.length === 0 &&
+        this.death_queue.length === 0
       ) {
         sfx.stop_fly();
         this.phase = SETTLE;
         this._settle_done = false;
       }
     } else if (this.phase === SETTLE) {
+      // Death FX enqueued OUTSIDE the FIRING phase (a retreat, a fall/burial
+      // kill during the settle itself) still have to play out -- and their
+      // grave blast must LAND (it damages neighbours) -- before the settle
+      // completes and any round-end decision runs, exactly as the binary's
+      // blocking FUN_3ef5_029a finishes before its caller continues.  Hold
+      // SETTLE and drive the effect tick here (it is otherwise only driven
+      // by FIRING/SYNC/SIM); re-settle afterwards for the new crater.
+      if (
+        this.death_queue.length > 0 ||
+        this.death_fountains.length > 0 ||
+        this.throe_fx.length > 0 ||
+        this.explosions.length > 0
+      ) {
+        this._animate_effects();
+        this._settle_done = false;
+        return;
+      }
       if (!this._settle_done) {
         this._do_settle();
         this._settle_done = true;
@@ -1188,7 +1223,8 @@ export class GameState {
       this.beams.length > 0 ||
       this.plasma_rings.length > 0 ||
       this.death_fountains.length > 0 ||
-      this.throe_fx.length > 0
+      this.throe_fx.length > 0 ||
+      this.death_queue.length > 0
     ) {
       return;
     }
@@ -1264,7 +1300,9 @@ export class GameState {
     for (const t of this.tanks) {
       this._battery_auto_trigger(t);
     }
-    if (this._win_check()) {
+    // A pending staged death still owes its grave blast (damage!): the round
+    // cannot end until the queue drains, or the blast would never land.
+    if (this.death_queue.length === 0 && this._win_check()) {
       this._end_round();
       return;
     }
@@ -2032,30 +2070,54 @@ export class GameState {
   }
 
   // ---- death-throe animations (the FUN_271b_0005 rand(11) roulette, #21) ----
+  // Kinds re-anchored to the byte decode (scorch-re/notes_death_throe_roulette.md
+  // s.2.4 + the 2026-07-07 case-body disassemblies): ball = case 4 expanding
+  // blue-white ball; spiral = case 5 (271b:0543 cos/sin stroke spiral); sparkle
+  // = case 6 dissolve shower (25a0:0081); fireworks = case 7 "6 launches +
+  // shimmer" (2d4f:0258); sink = case 8; ring = case 9 expanding trig rings;
+  // debris = case 10 hull-piece ballistic scatter (49d4:0177 stroke buffer ->
+  // 37d2:0392).  The former geyser kind was a misassigned reading and is gone.
   static THROE_LIFE: { [k: string]: number } = {
+    ball: 60,
     spiral: 46,
-    ring: 40,
-    geyser: 40,
     sparkle: 46,
+    ring: 40,
+    fireworks: 56,
     sink: 34,
+    debris: 50,
   };
 
-  add_throe(kind: string, x: number, y: number, color: number): void {
-    // Spawn one death-throe animation of `kind` at (x, y) in palette `color`.
+  add_throe(kind: string, x: number, y: number, color: number, life: number | null = null): void {
+    // Spawn one death-throe animation of `kind` at (x, y) in palette `color`
+    // (the dying tank's colour).  Geometry is RECONSTRUCTED to the decoded case
+    // entries (several case bodies are FP-mangled/undecompiled);
+    // render._draw_throe_fx draws from `frame`.  `life` overrides THROE_LIFE
+    // (case 4's rand(6)+5 expansion steps).  fireworks/sparkle carry shimmer
+    // particles; debris carries chunkier, slower hull fragments.
     const e: { [k: string]: unknown } = {
       kind,
       x: pyInt(x),
       y: pyInt(y),
       color: pyInt(color),
       frame: 0,
-      life: GameState.THROE_LIFE[kind] ?? 40,
+      life: life ? pyInt(life) : GameState.THROE_LIFE[kind] ?? 40,
     };
-    if (kind === "sparkle") {
+    if (kind === "fireworks" || kind === "sparkle") {
       const parts: number[][] = [];
       for (let i = 0; i < 36; i++) {
         const ang = (this.rng.pick(360) * Math.PI) / 180.0;
         const spd = 1.0 + this.rng.pick(40) / 10.0;
         parts.push([x, y, spd * Math.cos(ang), spd * Math.sin(ang) - 2.4]);
+      }
+      e.parts = parts;
+    } else if (kind === "debris") {
+      // 14 hull fragments on slower ballistic arcs (case 10; count and
+      // kinematics RECONSTRUCTED -- 37d2:0392 is FP-mangled).
+      const parts: number[][] = [];
+      for (let i = 0; i < 14; i++) {
+        const ang = (this.rng.pick(360) * Math.PI) / 180.0;
+        const spd = 0.6 + this.rng.pick(24) / 10.0;
+        parts.push([x, y, spd * Math.cos(ang), spd * Math.sin(ang) - 3.0]);
       }
       e.parts = parts;
     } else if (kind === "sink") {
@@ -2066,9 +2128,12 @@ export class GameState {
 
   _step_throe_fx(): void {
     // Advance each death-throe a frame; retire when it outlives its `life`.
+    // Particle kinds (fireworks/sparkle shimmer, debris hull chunks) fall under
+    // gravity; the geometric throes (ball/spiral/ring/sink) are computed from
+    // `frame` in the renderer.
     for (const e of this.throe_fx) {
       (e.frame as number) += 1;
-      if (e.kind === "sparkle") {
+      if (e.kind === "fireworks" || e.kind === "sparkle" || e.kind === "debris") {
         for (const p of e.parts as number[][]) {
           p[0] += p[2];
           p[1] += p[3];
@@ -2123,6 +2188,53 @@ export class GameState {
     this.beams = this.beams.filter((b) => b.frame <= 8);
     this._step_plasma_rings(); // plasma grow->shrink ring sweep
     this._step_throe_fx(); // death-throe animations (#21)
+    this._step_death_queue(); // staged death sequences (LAST: observes the
+    // post-step lists, spawns same-tick)
+  }
+
+  _step_death_queue(): void {
+    // Advance the staged death FIFO (death.step_queue) and run the game-side
+    // effects its signals request.  The award + die taunt fire HERE, at corpse
+    // processing time -- the binary's sweep order (FUN_2a4a_23f8 ->
+    // FUN_271b_0005 offsets 006d/009a), not at the health-zero instant.
+    const snd = this.cfg.is_on("SOUND");
+    for (const [sig, payload] of death.step_queue(this as unknown as death.DState)) {
+      if (sig === "award") {
+        scoring.award_kill(
+          this as unknown as scoring.State,
+          this.current_shooter as unknown as Parameters<typeof scoring.award_kill>[1],
+          payload as Parameters<typeof scoring.award_kill>[2],
+        );
+        const _line = talk.die_taunt(
+          payload as unknown as talk.TankLike,
+          this.talk as unknown as talk.TalkConfig,
+          this.rng,
+        );
+        if (_line !== null) {
+          talk.set_speech(
+            this as unknown as talk.SpeechState,
+            payload as unknown as talk.TankLike,
+            _line,
+            this.talk as unknown as talk.TalkConfig,
+          );
+        }
+      } else if (sig === "front") {
+        // the 40-tick flash (271b:03b5): pulse the victim's palette entry
+        this._death_pulse = { color: pyInt(payload as number), frame: 0 };
+        sfx.play("throe_front", snd);
+      } else if (sig === "thud") {
+        sfx.play("throe_thud", snd);
+      } else if (sig === "blast") {
+        sfx.play("explosion", snd, { size: payload as number });
+      } else if (sig === "sink") {
+        sfx.play("sink", snd);
+      } else if (sig === "cookoff") {
+        // the wreck bursts (hull-debris scatter): a small blast report
+        sfx.play("explosion", snd, { size: 18 });
+      } else if (sig === "climb") {
+        sfx.play("death", snd);
+      }
+    }
   }
 
   _tick_sky(): void {
@@ -2150,6 +2262,26 @@ export class GameState {
     this._tick_explosion_band();
     // 3) Lightning ground-strike sky whiten.
     this._tick_lightning_band();
+
+    // 3b) Death-flash pulse (FUN_271b_03b5, file 0x1df65): 40 ticks of the
+    //     dying tank's OWN palette register blinking (two video-helper calls
+    //     per tick on the colour base) while the rising tone plays.  The
+    //     port's analogue: alternate the victim's LUT entry between white
+    //     and its base each tick, restore at 40.
+    if (this._death_pulse !== null) {
+      const p = this._death_pulse;
+      const idx = p.color;
+      const base_row = this._lut_base[idx];
+      if (p.frame >= 40) {
+        lut.set_band(idx, idx, [base_row]);
+        this._death_pulse = null;
+      } else {
+        const white: RGB = [255, 255, 255];
+        lut.set_band(idx, idx, [p.frame % 2 ? white : base_row]);
+        p.frame += 1;
+      }
+    }
+
     // 4) Digger/tunneler trail glow cycle (band 0xAF..0xB8).
     this._tick_digger_band(steps);
     // 5) Firewall fire shimmer (band 0xAA,0x14).
@@ -2340,27 +2472,16 @@ export class GameState {
   }
 
   on_tank_destroyed(victim: Tank, weapon: weapons.Item | null = null): void {
-    // Death sequence (FUN_3ef5_029a): debris fountain + weapon-radius blast, the
-    // death buzz, and a die-pool taunt.
+    // Enqueue ONLY: the kill roulette (award, taunt, roll, case FX) runs when
+    // the queue PROCESSES this corpse -- the binary's dead-tank-sweep order
+    // (FUN_2a4a_23f8 -> FUN_271b_0005; notes_death_throe_roulette.md s.2-3).
+    // The ["award", tank] signal from death.step_queue drives the award and
+    // the die taunt in _step_death_queue above.
     death.death_sequence(
       this as unknown as death.DState,
       victim as unknown as death.DTank,
       weapon as unknown as Parameters<typeof death.death_sequence>[2],
     );
-    sfx.play("death", this.cfg.is_on("SOUND"));
-    const _line = talk.die_taunt(
-      victim as unknown as talk.TankLike,
-      this.talk as unknown as talk.TalkConfig,
-      this.rng,
-    );
-    if (_line !== null) {
-      talk.set_speech(
-        this as unknown as talk.SpeechState,
-        victim as unknown as talk.TankLike,
-        _line,
-        this.talk as unknown as talk.TalkConfig,
-      );
-    }
   }
 
   // --------------------------------------------------------------- round end
