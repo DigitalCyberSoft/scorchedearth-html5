@@ -144,10 +144,60 @@ class Ctx2D {
       }
     }
   }
-  drawImage(): void {
-    // The sprite Surface path never blits/copies a Surface; if this fires the test
-    // is exercising an unexpected path and should fail loudly rather than silently.
-    throw new Error("Ctx2D.drawImage: unexpected on the sprite Surface path");
+  drawImage(src: FakeCanvas, ...args: number[]): void {
+    // The drawers now build each tank variant ONCE and BLIT it (sprites.ts
+    // tankSprite; per-pixel set_at stamping was the tank-setup hot spot), so the
+    // stub composites source-over exactly like a real canvas: integer coords,
+    // 1:1 scale, the 3-arg (dx,dy) and 9-arg (sx,sy,sw,sh,dx,dy,sw,sh) forms
+    // pygame.ts blit/copy/subsurface use. Anything else still fails loudly.
+    let sx = 0;
+    let sy = 0;
+    let sw = src.width;
+    let sh = src.height;
+    let dx = 0;
+    let dy = 0;
+    if (args.length === 2) {
+      [dx, dy] = args;
+    } else if (args.length === 8) {
+      [sx, sy, sw, sh, dx, dy] = args;
+      if (args[6] !== sw || args[7] !== sh) {
+        throw new Error("Ctx2D.drawImage: scaling unsupported in the stub");
+      }
+    } else {
+      throw new Error(`Ctx2D.drawImage: unsupported arity ${args.length + 1}`);
+    }
+    const sctx = src.getContext("2d");
+    for (let yy = 0; yy < sh; yy++) {
+      for (let xx = 0; xx < sw; xx++) {
+        const fx = sx + xx;
+        const fy = sy + yy;
+        if (fx < 0 || fx >= src.width || fy < 0 || fy >= src.height) continue;
+        const tx = Math.floor(dx) + xx;
+        const ty = Math.floor(dy) + yy;
+        if (tx < 0 || tx >= this._w || ty < 0 || ty >= this._h) continue;
+        const s = (fy * src.width + fx) * 4;
+        const d = (ty * this._w + tx) * 4;
+        const sa = sctx.data[s + 3];
+        if (sa === 0) continue;
+        if (sa === 255) {
+          this.data[d] = sctx.data[s];
+          this.data[d + 1] = sctx.data[s + 1];
+          this.data[d + 2] = sctx.data[s + 2];
+          this.data[d + 3] = 255;
+        } else {
+          // general source-over (the sprite path only carries a in {0,255})
+          const a = sa / 255;
+          const da = this.data[d + 3] / 255;
+          const oa = a + da * (1 - a);
+          const mix = (sv: number, dv: number): number =>
+            oa === 0 ? 0 : Math.round((sv * a + dv * da * (1 - a)) / oa);
+          this.data[d] = mix(sctx.data[s], this.data[d]);
+          this.data[d + 1] = mix(sctx.data[s + 1], this.data[d + 1]);
+          this.data[d + 2] = mix(sctx.data[s + 2], this.data[d + 2]);
+          this.data[d + 3] = Math.round(oa * 255);
+        }
+      }
+    }
   }
 }
 

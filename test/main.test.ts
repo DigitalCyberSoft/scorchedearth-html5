@@ -15,7 +15,14 @@
  *      skip() case.  _ZoomWipeMath is constructed directly (it touches only
  *      palette.LiveLUT, which is DOM-free); the _ZoomWipe SURFACE side (subsurface/
  *      smoothscale/BLEND_RGB_ADD) needs a canvas and defers to Phase 3.
- *   3. The run-loop dt clamp dt = min(elapsed_s, 1/30).
+ *   3. The run-loop time base: stepPlan's fixed-step catch-up.  INTENTIONAL
+ *      DIVERGENCE from the oracle (main.py:649 dt = min(elapsed, 1/30)): the
+ *      oracle formula under-advances game time below 30 fps (slow motion on
+ *      weak hardware); the port banks real elapsed time and consumes it in
+ *      exact STEP_DT steps, capped at MAX_FRAME_DEBT_S so a pause does not
+ *      replay as a burst.  The old dt_clamp oracle vectors are no longer
+ *      asserted (the formula they pin is the defect that was fixed); the
+ *      engine-math gates are untouched.
  *
  * EPSILON POLICY:
  *   frame / done / amt / want / dt are integers / booleans / exactly-representable
@@ -35,7 +42,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { _wants_zoom_wipe, _ZoomWipeMath, TRANSITION_FRAMES, _FRAME_DT } from "../src/main";
+import {
+  _wants_zoom_wipe,
+  _ZoomWipeMath,
+  TRANSITION_FRAMES,
+  _FRAME_DT,
+  stepPlan,
+  STEP_DT,
+  MAX_FRAME_DEBT_S,
+} from "../src/main";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VECTORS = join(__dirname, "..", "oracle", "vectors", "main.json");
@@ -150,12 +165,42 @@ describe("main._ZoomWipeMath animation math", () => {
   });
 });
 
-describe("main run-loop dt clamp", () => {
-  it("dt = min(elapsed_s, 1/30) matches the oracle", () => {
-    const cap = 1 / 30.0;
-    expect(cap).toBe(V.dt_clamp.cap);
-    for (const s of V.dt_clamp.samples) {
-      expect(Math.min(s.elapsed_s, cap)).toBe(s.dt);
+describe("main run-loop fixed-step plan (intentional divergence from main.py:649)", () => {
+  it("consumes elapsed time in whole STEP_DT steps, carrying the exact remainder", () => {
+    let debt = 0;
+    let stepped = 0;
+    let wall = 0;
+    // a steady 24 fps frame train: every frame is longer than STEP_DT
+    for (let i = 0; i < 240; i++) {
+      const elapsed = 1 / 24;
+      wall += elapsed;
+      const plan = stepPlan(elapsed, debt);
+      debt = plan.debt;
+      stepped += plan.steps;
+      expect(plan.debt).toBeGreaterThanOrEqual(0);
+      expect(plan.debt).toBeLessThan(STEP_DT);
     }
+    // game time tracks wall time to within one carried step (no dilation; the
+    // oracle clamp would have advanced only (1/30)/(1/24) = 0.8x here)
+    expect(Math.abs(stepped * STEP_DT - wall)).toBeLessThan(STEP_DT);
+  });
+
+  it("runs 1 step per frame at 60 fps and 2 at 30 fps", () => {
+    expect(stepPlan(1 / 60, 0).steps).toBe(1);
+    const p30 = stepPlan(1 / 30, 0);
+    expect(p30.steps).toBe(2);
+    expect(p30.debt).toBeLessThan(1e-12);
+  });
+
+  it("caps a pause-resume spike at MAX_FRAME_DEBT_S instead of replaying it", () => {
+    const p = stepPlan(300.0, 0);
+    expect(p.steps).toBe(Math.floor(MAX_FRAME_DEBT_S / STEP_DT));
+    expect(p.steps * STEP_DT + p.debt).toBeCloseTo(MAX_FRAME_DEBT_S, 12);
+  });
+
+  it("never goes negative on clock weirdness", () => {
+    const p = stepPlan(-0.5, -1);
+    expect(p.steps).toBe(0);
+    expect(p.debt).toBe(0);
   });
 });

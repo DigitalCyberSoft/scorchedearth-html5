@@ -321,9 +321,15 @@ export type Size = [number, number] | readonly [number, number];
 /**
  * pygame.Surface backed by an HTMLCanvasElement + 2D context.
  *
- * The context is acquired with { willReadFrequently: true } because the port
- * reads pixels back (surfarray, set_at/get_at, per-pixel-alpha); without the
- * hint browsers keep the canvas GPU-side and every getImageData stalls.
+ * The context is GPU-backed by default. Pass the port-private READBACK flag for
+ * surfaces whose pixels are READ programmatically (surfarray.pixels_alpha /
+ * repeated get_at): it sets { willReadFrequently: true }, keeping those canvases
+ * CPU-side so getImageData does not stall. Everything else (the backbuffer, text,
+ * widget chrome) stays on the GPU -- a blanket willReadFrequently used to force
+ * the WHOLE game into software raster, measured ~190x slower per full-frame fill
+ * on Intel ADL GT2 (0.378 ms vs 0.002 ms; 2026-07-07 device profile). One-shot
+ * reads on unhinted surfaces (smoothscale sources, the wipe card, gate pixel
+ * compares) pay a single GPU sync, which is the right trade.
  *
  * A per-pixel-alpha surface (constructed via convert_alpha / make from RGBA, or
  * the SRCALPHA flag) tracks alpha; a plain surface is opaque. set_colorkey /
@@ -352,7 +358,10 @@ export class Surface {
     this.canvas = document.createElement("canvas");
     this.canvas.width = this._w;
     this.canvas.height = this._h;
-    this.ctx = this.canvas.getContext("2d", { willReadFrequently: true })!;
+    this.ctx = this.canvas.getContext(
+      "2d",
+      (flags & READBACK) !== 0 ? { willReadFrequently: true } : undefined,
+    )!;
     // A fresh pygame Surface (no SRCALPHA) is opaque black; an SRCALPHA surface
     // is fully transparent. Canvas starts transparent-black, so seed the opaque
     // case to black so get_at/blit see pygame's initial state.
@@ -927,10 +936,33 @@ export class Font {
     return ctx;
   }
 
+  // -------------------------------------------------------------------------
+  // Text caches. Menus re-render/measure the SAME strings every frame (measured
+  // 73-138 fresh canvases per frame before caching); both maps are keyed by
+  // cssFont + text (+ colors for render) and evicted oldest-first at a cap.
+  // -------------------------------------------------------------------------
+  private static _sizeCache = new Map<string, number>();
+  private static _renderCache = new Map<string, Surface>();
+  private static readonly _SIZE_CACHE_CAP = 4096;
+  private static readonly _RENDER_CACHE_CAP = 1024;
+
+  private static _evict(cache: Map<string, unknown>, cap: number): void {
+    while (cache.size > cap) {
+      const oldest = cache.keys().next().value as string;
+      cache.delete(oldest);
+    }
+  }
+
   /** font.size(text) -> [w, h]: pixel width of `text` and the font's line height. */
   size(text: string): [number, number] {
-    const ctx = this.measureCtx();
-    const w = Math.ceil(ctx.measureText(text).width);
+    const key = this.cssFont + "\x00" + text;
+    let w = Font._sizeCache.get(key);
+    if (w === undefined) {
+      const ctx = this.measureCtx();
+      w = Math.ceil(ctx.measureText(text).width);
+      Font._sizeCache.set(key, w);
+      Font._evict(Font._sizeCache, Font._SIZE_CACHE_CAP);
+    }
     return [w, this.get_height()];
   }
 
@@ -967,26 +999,40 @@ export class Font {
    * the measured text box and `color` text is drawn; with `bg` the whole surface
    * is filled first (opaque) else it is transparent (per-pixel alpha), matching
    * pygame.font.Font.render. Returns a 1-px-min surface for empty text.
+   *
+   * CACHED + SHARED: repeat (font, text, color, bg) calls return the SAME
+   * Surface, so callers MUST NOT mutate the result (no set_alpha/set_colorkey/
+   * draw-into). Audited 2026-07-07: every call site blits the result and drops
+   * it; the set_alpha overlays in render.ts/widgets.ts are fresh plain Surfaces,
+   * never text.
    */
   render(text: string, _antialias: boolean, color: ColorArg, bg?: ColorArg | null): Surface {
+    const fg = normColor(color);
+    const bgc = bg === undefined || bg === null ? null : normColor(bg);
+    const key =
+      this.cssFont + "\x00" + text + "\x00" + fg.join(",") + "\x00" + (bgc === null ? "-" : bgc.join(","));
+    const hit = Font._renderCache.get(key);
+    if (hit !== undefined) return hit;
     const ctx0 = this.measureCtx();
     const w = Math.max(1, Math.ceil(ctx0.measureText(text).width));
     const ad = this.metrics();
     const h = Math.max(1, Math.ceil(ad.ascent + ad.descent));
-    const surf = new Surface([w, h], bg ? 0 : SRCALPHA);
+    const surf = new Surface([w, h], bgc ? 0 : SRCALPHA);
     const ctx = surf.ctx;
-    if (bg) {
-      ctx.fillStyle = rgbaToCss(normColor(bg));
+    if (bgc) {
+      ctx.fillStyle = rgbaToCss(bgc);
       ctx.fillRect(0, 0, w, h);
     } else {
       ctx.clearRect(0, 0, w, h);
     }
     ctx.font = this.cssFont;
     ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = rgbaToCss(normColor(color));
+    ctx.fillStyle = rgbaToCss(fg);
     // Draw at the baseline (ascent down from the top), so the glyph box matches
     // the surface the port blits at (x, y) top-left.
     ctx.fillText(text, 0, ad.ascent);
+    Font._renderCache.set(key, surf);
+    Font._evict(Font._renderCache, Font._RENDER_CACHE_CAP);
     return surf;
   }
 }
@@ -1023,6 +1069,9 @@ export const BLEND_RGB_MAX = 0x0a;
 // Surface creation flags.
 export const SRCALPHA = 0x00010000; // per-pixel alpha (SDL value)
 export const SCALED = 0x00000200; // display-scale hint (display.set_mode flag)
+// PORT-PRIVATE (no SDL equivalent): request a willReadFrequently 2D context for
+// surfaces whose pixels are read programmatically (see the Surface docstring).
+export const READBACK = 0x40000000;
 export const FULLSCREEN = 0x00000800; // fullscreen hint (display.set_mode flag)
 
 // --- Event types (SDL/pygame numeric values) ---

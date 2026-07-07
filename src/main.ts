@@ -107,6 +107,32 @@ import * as sprites from "./sprites";
 export const TRANSITION_FRAMES = 20; // FACT: 0x14 outer steps, FUN_2917_041d.c:12
 export const _FRAME_DT = 1.0 / 60.0; // RECONSTRUCTED per-step wall-clock (see above)
 
+// ---------------------------------------------------------------------------
+// run-loop time base -- INTENTIONAL DIVERGENCE from main.py:649.
+// ---------------------------------------------------------------------------
+// The oracle's loop feeds each frame dt = min(elapsed, 1/30) to update(). That
+// formula assumes the host renders at 30+ fps; below that it under-advances
+// game time, so a slow machine plays in SLOW MOTION (measured 0.56x at 16.9 fps
+// on the 2026-07-07 Chromebook profile -- the user-visible "menu gradient moves
+// slow"). The engine math is untouched; only the GLUE changes: real elapsed
+// time is banked as debt and consumed in exact STEP_DT game steps (the same
+// fixed-step pattern the MP screen already uses), so game speed is 1.0x at any
+// frame rate. MAX_FRAME_DEBT_S keeps the oracle clamp's real purpose -- a
+// pause/tab-switch must not replay as a burst -- and bounds worst-case steps
+// per frame (0.25 s = 15 steps).
+export const STEP_DT = 1 / 60.0;
+export const MAX_FRAME_DEBT_S = 0.25;
+
+/** How many whole STEP_DT game steps to run this frame, and the remainder debt
+ *  to carry. Pure (tested headless): debt' = min(debt + elapsed, cap) - steps*STEP_DT. */
+export function stepPlan(elapsed_s: number, debt_s: number): { steps: number; debt: number } {
+  const d = Math.min(Math.max(debt_s, 0) + Math.max(elapsed_s, 0), MAX_FRAME_DEBT_S);
+  const steps = Math.floor(d / STEP_DT);
+  // steps*STEP_DT can exceed d by ~1e-17 (floor on the quotient does not make
+  // the product <= d in floats); the carried debt is by contract in [0, STEP_DT).
+  return { steps, debt: Math.max(0, d - steps * STEP_DT) };
+}
+
 /** A screen as the App's stack holds it.  The base Screen plus the optional
  *  members the wipe / dispatch read off concrete subclasses (panel.rect, result,
  *  sell_slot, tank, restored).  Permissive like screen.py's getattr probes. */
@@ -566,6 +592,8 @@ export class App {
 
   // loop time base (the analog of pygame.time.Clock: ms since boot via the host)
   private _lastMs: number | null;
+  // unconsumed real time, carried between frames (see stepPlan above)
+  private _debt = 0;
 
   constructor(surface: pygame.Surface, fullscreen = false, mayhem = false, fpsSecs = 0) {
     // diagnostics first (DIAGNOSTICS.md / diag.py): logging + the soft watchdog.
@@ -930,9 +958,11 @@ export class App {
   // ---- main loop (main.py:642) ----
   /**
    * step(nowMs) -- one frame of the App.run loop, driven by requestAnimationFrame
-   * (the browser's clock; main.py uses pygame.time.Clock.tick(60)).  dt = the real
-   * elapsed seconds clamped to 1/30 (main.py:649).  Pumps the queued browser events
-   * (already pygame-shaped), advances/draws the stack or the wipe, and presents.
+   * (the browser's clock; main.py uses pygame.time.Clock.tick(60)).  Pumps the
+   * queued browser events (already pygame-shaped), consumes the real elapsed time
+   * as whole STEP_DT game steps via stepPlan (fixed-step catch-up; see the
+   * divergence note at STEP_DT -- the oracle's dt = min(elapsed, 1/30) ran slow
+   * machines in slow motion), draws once, and presents.
    *
    * Returns false when the App has stopped (running=False), so the RAF driver can
    * halt.  The boundary (DTM 6.3b) logs WITH the state snapshot and RE-RAISES.
@@ -943,9 +973,8 @@ export class App {
     }
     const elapsed = this._lastMs === null ? 0 : (nowMs - this._lastMs) / 1000.0;
     this._lastMs = nowMs;
-    const dt = Math.min(elapsed, 1 / 30.0);
     diag.heartbeat(); // no-op in browser
-    this.sampler.tick(dt);
+    this.sampler.tick(elapsed);
     this.watchdog.begin_frame();
     try {
       for (const e of events) {
@@ -967,12 +996,22 @@ export class App {
         }
       }
       if (this._wipe !== null) {
-        this._wipe.advance(dt);
+        // UI transition: consume REAL elapsed time (its own _FRAME_DT accumulator
+        // is frame-rate independent); cap only the pause-resume spike. The stack
+        // below is frozen during a wipe, so its debt does not accrue.
+        this._wipe.advance(Math.min(elapsed, MAX_FRAME_DEBT_S));
         if (this._wipe.done) {
           this._wipe = null; // settle onto the live screen
         }
+        this._debt = 0;
       } else {
-        this._act(this.top.update(dt));
+        const plan = stepPlan(elapsed, this._debt);
+        this._debt = plan.debt;
+        // An update action can arm a wipe or stop the app mid-frame; both end
+        // this frame's stepping (matching what consecutive fast frames did).
+        for (let i = 0; i < plan.steps && this.running && this._wipe === null; i++) {
+          this._act(this.top.update(STEP_DT));
+        }
       }
       this._draw();
       _present(this.screen);

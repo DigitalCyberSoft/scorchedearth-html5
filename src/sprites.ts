@@ -215,7 +215,8 @@ export function buildSpritePixels(
 /** Build a Surface from a column-major PixelBuffer (RGB via blit_array, then the
  *  alpha plane), matching the load_title_mountain pattern in src/pygame.ts. */
 function surfaceFromBuffer(buf: PixelBuffer): pygame.Surface {
-  const surf = new pygame.Surface([buf.w, buf.h], pygame.SRCALPHA);
+  // READBACK: pixels_alpha below reads the surface right back (getImageData).
+  const surf = new pygame.Surface([buf.w, buf.h], pygame.SRCALPHA | pygame.READBACK);
   surf.fill([0, 0, 0, 0]);
   pygame.surfarray.blit_array(surf, { w: buf.w, h: buf.h, data: buf.rgb });
   pygame.surfarray.pixels_alpha(surf).set(buf.alpha);
@@ -517,16 +518,74 @@ export function tankBodyPixels(
 
 /** Stamp every opaque pixel of `buf` onto `surf` via set_at (the compositing path
  *  draw_tank/draw_tank_icon_cell take, equivalent to set_at/fill onto the target). */
-function stampBuffer(surf: pygame.Surface, buf: PixelBuffer): void {
-  for (let x = 0; x < buf.w; x++) {
-    const col = x * buf.h;
-    for (let y = 0; y < buf.h; y++) {
-      const ai = col + y;
-      if (buf.alpha[ai] === 0) continue;
-      const ri = ai * 3;
-      surf.set_at([x, y], [buf.rgb[ri], buf.rgb[ri + 1], buf.rgb[ri + 2], 255]);
-    }
+/** A built tank-body sprite: the SRCALPHA surface plus the blit offset of its
+ *  top-left relative to the stamp origin (the wheel-row center the drawers pass). */
+interface TankSprite {
+  surf: pygame.Surface;
+  ox: number;
+  oy: number;
+}
+
+// Tank sprites used to be re-decoded and stamped PIXEL BY PIXEL (set_at = a
+// clearRect+fillRect pair) into a buffer spanning the WHOLE target surface,
+// every frame, per tank/cell -- 53.7% of all CPU self-time on the tank-setup
+// screen in the 2026-07-07 device profile. The pixels are a pure function of
+// the key below, so build each variant ONCE (tight bbox-sized buffer -> the
+// same surfaceFromBuffer path get_sprite uses) and blit thereafter. Blitting an
+// SRCALPHA sprite source-over writes exactly the pixels stampBuffer wrote
+// (opaque cells replace, transparent cells leave the target untouched).
+const _tankSpriteCache = new Map<string, TankSprite>();
+const _TANK_SPRITE_CACHE_CAP = 512;
+
+function tankSprite(
+  rgb: RGB,
+  idx: number,
+  opts: { facing: number; angle: number; scale: number; barrelRgb: RGB | null; drawBarrel: boolean },
+): TankSprite {
+  const key =
+    idx +
+    "|" +
+    rgb.join(",") +
+    "|" +
+    opts.scale +
+    "|" +
+    opts.angle +
+    "|" +
+    opts.facing +
+    "|" +
+    (opts.barrelRgb === null ? "-" : opts.barrelRgb.join(",")) +
+    "|" +
+    opts.drawBarrel;
+  const hit = _tankSpriteCache.get(key);
+  if (hit !== undefined) return hit;
+  // Tight extent around the stamp origin: hull strokes (designBbox) plus the
+  // barrel, which may point anywhere from the turret mount (facing mirrors x,
+  // so the x reach is symmetric). Margins are deliberately generous; the buffer
+  // is dozens of pixels on a side either way.
+  const di = designIndex(idx);
+  const [minx, maxx, miny, maxyv] = designBbox(idx);
+  const bl = barrelLen(di);
+  const mount = data.TANK_TURRET[di] ?? [0, 0];
+  const reach = Math.max(maxx, -minx) + bl + 2;
+  const y0 = Math.min(miny, mount[1] - bl) - 2;
+  const y1 = maxyv + bl + 2;
+  const scale = opts.scale;
+  const tw = (2 * reach + 1) * scale;
+  const th = (y1 - y0 + 1) * scale;
+  const buf = tankBodyPixels(tw, th, reach * scale, -y0 * scale, rgb, idx, {
+    facing: opts.facing,
+    angle: opts.angle,
+    scale,
+    barrelRgb: opts.barrelRgb,
+    drawBarrel: opts.drawBarrel,
+  });
+  const sprite: TankSprite = { surf: surfaceFromBuffer(buf), ox: -reach * scale, oy: y0 * scale };
+  _tankSpriteCache.set(key, sprite);
+  while (_tankSpriteCache.size > _TANK_SPRITE_CACHE_CAP) {
+    const oldest = _tankSpriteCache.keys().next().value as string;
+    _tankSpriteCache.delete(oldest);
   }
+  return sprite;
 }
 
 /**
@@ -554,13 +613,14 @@ export function draw_tank(
   const scale = opts.scale ?? 1;
   const facing = opts.facing ?? 1;
   const rgb = resolveColor(color, asPalette(opts.pal));
-  const [w, h] = surf.get_size();
-  const buf = tankBodyPixels(w, h, x, y, rgb, Math.trunc(icon_index), {
+  const t = tankSprite(rgb, Math.trunc(icon_index), {
     facing,
     angle,
     scale,
+    barrelRgb: null,
+    drawBarrel: true,
   });
-  stampBuffer(surf, buf);
+  surf.blit(t.surf, [x + t.ox, y + t.oy]);
 }
 
 /**
@@ -600,13 +660,14 @@ export function draw_tank_icon_cell(
   const extentH = (bottom - top) * scale;
   // Python int // 2 floor-div; extentH >= 0 so >> 1 (toward -inf for non-neg) matches.
   const originY = box.centery + Math.floor(extentH / 2) - bottom * scale;
-  const [w, h] = surf.get_size();
-  const buf = tankBodyPixels(w, h, cx, originY, rgb, designIdx, {
+  const t = tankSprite(rgb, designIdx, {
+    facing: 1,
     angle: 90,
     scale,
     barrelRgb: barrel,
+    drawBarrel: true,
   });
-  stampBuffer(surf, buf);
+  surf.blit(t.surf, [cx + t.ox, originY + t.oy]);
 }
 
 /** maxy of a design's strokes (the wheel row, = 0); split out so draw_tank_icon_cell
